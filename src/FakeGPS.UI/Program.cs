@@ -2,10 +2,13 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Globalization;
 using System.IO;
 using System.Net;
+using System.Runtime.InteropServices;
 using System.Device.Location;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
@@ -18,19 +21,21 @@ namespace FakeGPS.UI
         public double Latitude { get; set; }
         public double Longitude { get; set; }
         public string Name { get; set; }
+        public string Timezone { get; set; }
 
-        public LatLong(double lat, double lon, string name = "")
+        public LatLong(double lat, double lon, string name = "", string tz = "Europe/Amsterdam")
         {
             Latitude = lat;
             Longitude = lon;
             Name = name;
+            Timezone = tz;
         }
 
         public override string ToString()
         {
             if (string.IsNullOrEmpty(Name))
                 return string.Format("{0}, {1}", Latitude.ToString("F6", CultureInfo.InvariantCulture), Longitude.ToString("F6", CultureInfo.InvariantCulture));
-            return string.Format("{0} ({1}, {2})", Name, Latitude.ToString("F4", CultureInfo.InvariantCulture), Longitude.ToString("F4", CultureInfo.InvariantCulture));
+            return Name;
         }
     }
 
@@ -89,7 +94,7 @@ namespace FakeGPS.UI
                 {
                     string output = proc.StandardOutput.ReadToEnd();
                     proc.WaitForExit(3000);
-                    return output.Contains("Status:                    Started") || output.Contains("Status:                    OK") || output.Contains("ROOT\\SENSOR\\0000");
+                    return output.Contains("Started") || output.Contains("OK") || output.Contains("Запущено");
                 }
             }
             catch
@@ -178,6 +183,226 @@ namespace FakeGPS.UI
         }
     }
 
+    public static class OpenMapGeocoder
+    {
+        public static List<LatLong> Search(string query)
+        {
+            var results = new List<LatLong>();
+            if (string.IsNullOrWhiteSpace(query)) return results;
+
+            ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
+            string url = "https://nominatim.openstreetmap.org/search?format=json&limit=5&q=" + Uri.EscapeDataString(query.Trim());
+
+            var req = (HttpWebRequest)WebRequest.Create(url);
+            req.UserAgent = "FakeGPS-Win11-Controller/2.0";
+            req.Timeout = 8000;
+
+            using (var resp = (HttpWebResponse)req.GetResponse())
+            using (var reader = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
+            {
+                string json = reader.ReadToEnd();
+                var matches = Regex.Matches(json, "\"lat\"\\s*:\\s*\"([^\"]+)\"\\s*,\\s*\"lon\"\\s*:\\s*\"([^\"]+)\".*?\"display_name\"\\s*:\\s*\"([^\"]+)\"");
+                foreach (Match m in matches)
+                {
+                    double lat, lon;
+                    if (double.TryParse(m.Groups[1].Value, NumberStyles.Any, CultureInfo.InvariantCulture, out lat) &&
+                        double.TryParse(m.Groups[2].Value, NumberStyles.Any, CultureInfo.InvariantCulture, out lon))
+                    {
+                        string name = Regex.Unescape(m.Groups[3].Value);
+                        results.Add(new LatLong(lat, lon, name));
+                    }
+                }
+            }
+
+            return results;
+        }
+    }
+
+    public class DiscoveredAIApp
+    {
+        public string Name { get; set; }
+        public string Category { get; set; } // Desktop, UWP, CLI, Browser Tab
+        public string ProcessName { get; set; }
+        public string ExecutablePath { get; set; }
+        public bool IsRunning { get; set; }
+        public int Pid { get; set; }
+        public bool SelectedForKillSwitch { get; set; }
+    }
+
+    public static class AIDiscoveryEngine
+    {
+        private static readonly string[] KnownAIKeywords = new string[]
+        {
+            "claude", "chatgpt", "openai", "anthropic", "perplexity", "comet",
+            "cursor", "windsurf", "ollama", "lmstudio", "lm studio", "jan",
+            "anythingllm", "chatbox", "cherry", "deepseek", "grok", "poe", "copilot"
+        };
+
+        private static readonly string[] BrowserProcessNames = new string[]
+        {
+            "brave", "chrome", "msedge", "firefox", "opera", "vivaldi", "arc", "comet"
+        };
+
+        public static List<DiscoveredAIApp> DiscoverAll()
+        {
+            var found = new List<DiscoveredAIApp>();
+            var seenPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            // 1. Scan running processes
+            try
+            {
+                foreach (var p in Process.GetProcesses())
+                {
+                    try
+                    {
+                        string pname = p.ProcessName.ToLowerInvariant();
+                        string title = "";
+                        try { title = p.MainWindowTitle ?? ""; } catch { }
+                        string path = "";
+                        try { path = p.MainModule != null ? p.MainModule.FileName : ""; } catch { }
+
+                        bool isKnownProcess = false;
+                        foreach (var kw in KnownAIKeywords)
+                        {
+                            if (pname.Contains(kw.Replace(" ", "")))
+                            {
+                                isKnownProcess = true;
+                                break;
+                            }
+                        }
+
+                        bool isBrowserWithAI = false;
+                        if (!isKnownProcess && !string.IsNullOrEmpty(title))
+                        {
+                            foreach (var b in BrowserProcessNames)
+                            {
+                                if (pname == b)
+                                {
+                                    string lowerTitle = title.ToLowerInvariant();
+                                    foreach (var kw in KnownAIKeywords)
+                                    {
+                                        if (lowerTitle.Contains(kw) || lowerTitle.Contains("gemini"))
+                                        {
+                                            isBrowserWithAI = true;
+                                            break;
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (isKnownProcess || isBrowserWithAI)
+                        {
+                            string key = !string.IsNullOrEmpty(path) ? path + ":" + pname : pname + ":" + p.Id;
+                            if (isKnownProcess && seenPaths.Contains(key)) continue;
+                            seenPaths.Add(key);
+
+                            found.Add(new DiscoveredAIApp
+                            {
+                                Name = isBrowserWithAI ? string.Format("{0} ({1})", p.ProcessName, title) : p.ProcessName,
+                                Category = isBrowserWithAI ? "Browser AI Tab" : (path.Contains("WindowsApps") ? "UWP / Store App" : "Desktop / CLI"),
+                                ProcessName = p.ProcessName,
+                                ExecutablePath = path,
+                                IsRunning = true,
+                                Pid = p.Id,
+                                SelectedForKillSwitch = true
+                            });
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+
+            // 2. Scan installed paths in %LocalAppData%\Programs and %UserProfile%\.local\bin
+            var scanDirs = new List<string>
+            {
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs"),
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), @".local\bin")
+            };
+
+            foreach (var dir in scanDirs)
+            {
+                if (!Directory.Exists(dir)) continue;
+                try
+                {
+                    foreach (var exe in Directory.GetFiles(dir, "*.exe", SearchOption.AllDirectories))
+                    {
+                        string fname = Path.GetFileNameWithoutExtension(exe).ToLowerInvariant();
+                        foreach (var kw in KnownAIKeywords)
+                        {
+                            if (fname.Contains(kw.Replace(" ", "")) && !fname.Contains("unins") && !fname.Contains("update"))
+                            {
+                                string key = exe + ":" + fname;
+                                if (!seenPaths.Contains(key))
+                                {
+                                    seenPaths.Add(key);
+                                    found.Add(new DiscoveredAIApp
+                                    {
+                                        Name = Path.GetFileNameWithoutExtension(exe),
+                                        Category = "Installed (Offline)",
+                                        ProcessName = Path.GetFileNameWithoutExtension(exe),
+                                        ExecutablePath = exe,
+                                        IsRunning = false,
+                                        Pid = 0,
+                                        SelectedForKillSwitch = true
+                                    });
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            // 3. Scan WindowsApps for OpenAI.ChatGPT / OpenAI.Codex / Claude
+            string winApps = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "WindowsApps");
+            if (Directory.Exists(winApps))
+            {
+                try
+                {
+                    foreach (var folder in Directory.GetDirectories(winApps))
+                    {
+                        string folderName = Path.GetFileName(folder).ToLowerInvariant();
+                        if (folderName.Contains("openai") || folderName.Contains("claude") || folderName.Contains("anthropic") || folderName.Contains("perplexity"))
+                        {
+                            string appExe = Path.Combine(folder, @"app\ChatGPT.exe");
+                            if (!File.Exists(appExe))
+                            {
+                                var exes = Directory.GetFiles(folder, "*.exe", SearchOption.AllDirectories);
+                                if (exes.Length > 0) appExe = exes[0];
+                            }
+                            if (File.Exists(appExe))
+                            {
+                                string pname = Path.GetFileNameWithoutExtension(appExe);
+                                string key = appExe + ":" + pname.ToLowerInvariant();
+                                if (!seenPaths.Contains(key))
+                                {
+                                    seenPaths.Add(key);
+                                    found.Add(new DiscoveredAIApp
+                                    {
+                                        Name = pname + " (Store)",
+                                        Category = "UWP / Store App",
+                                        ProcessName = pname,
+                                        ExecutablePath = appExe,
+                                        IsRunning = false,
+                                        Pid = 0,
+                                        SelectedForKillSwitch = true
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            return found;
+        }
+    }
+
     public class AppLocationItem
     {
         public string DisplayName { get; set; }
@@ -193,7 +418,6 @@ namespace FakeGPS.UI
         public static List<AppLocationItem> GetApps()
         {
             var list = new List<AppLocationItem>();
-
             using (var baseKey = Registry.CurrentUser.OpenSubKey(BaseConsentPath, true))
             {
                 if (baseKey == null) return list;
@@ -223,7 +447,6 @@ namespace FakeGPS.UI
                     }
                 }
             }
-
             return list;
         }
 
@@ -232,10 +455,7 @@ namespace FakeGPS.UI
             string subPath = BaseConsentPath + @"\" + registryKeyName;
             using (var key = Registry.CurrentUser.OpenSubKey(subPath, true))
             {
-                if (key != null)
-                {
-                    key.SetValue("Value", allow ? "Allow" : "Deny");
-                }
+                if (key != null) key.SetValue("Value", allow ? "Allow" : "Deny");
             }
         }
 
@@ -245,10 +465,7 @@ namespace FakeGPS.UI
             string subPath = BaseConsentPath + @"\" + encoded;
             using (var key = Registry.CurrentUser.CreateSubKey(subPath))
             {
-                if (key != null)
-                {
-                    key.SetValue("Value", allow ? "Allow" : "Deny");
-                }
+                if (key != null) key.SetValue("Value", allow ? "Allow" : "Deny");
             }
         }
     }
@@ -257,13 +474,11 @@ namespace FakeGPS.UI
     {
         public static Process LaunchWithSpoofing(string exePath, string arguments, string timeZoneId, string proxyUrl = "")
         {
-            if (string.IsNullOrEmpty(timeZoneId))
-                timeZoneId = "Europe/Amsterdam";
+            if (string.IsNullOrEmpty(timeZoneId)) timeZoneId = "Europe/Amsterdam";
 
             var psi = new ProcessStartInfo();
             psi.FileName = exePath;
 
-            // Build Chromium / Electron flags for zero-leak spoofing
             var extraArgs = new List<string>();
             extraArgs.Add(string.Format("--timezone=\"{0}\"", timeZoneId));
             extraArgs.Add("--force-webrtc-ip-handling-policy=disable_non_proxied_udp");
@@ -283,18 +498,10 @@ namespace FakeGPS.UI
 
             psi.Arguments = combinedArgs;
             psi.UseShellExecute = false;
-
-            // Set Environment Variables for V8, Node, WebView2, and C-Runtime
             psi.EnvironmentVariables["TZ"] = timeZoneId;
             psi.EnvironmentVariables["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = combinedArgs;
 
-            // Ensure app is allowed in Windows Location Consent Store
-            try
-            {
-                PerAppLocationManager.AddAppByPath(exePath, true);
-            }
-            catch { }
-
+            try { PerAppLocationManager.AddAppByPath(exePath, true); } catch { }
             return Process.Start(psi);
         }
 
@@ -306,7 +513,6 @@ namespace FakeGPS.UI
                 @"C:\Program Files\Google\Chrome\Application\chrome.exe",
                 @"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
             };
-
             foreach (var p in paths)
             {
                 if (File.Exists(p)) return p;
@@ -317,29 +523,27 @@ namespace FakeGPS.UI
 
     public static class AIKillSwitch
     {
-        private static readonly string[] AIProcessNames = new string[]
-        {
-            "claude", "chatgpt", "perplexity", "comet"
-        };
-
         private const string FirewallRuleName = "FakeGPS_AI_KillSwitch_Block";
 
-        public static int TerminateAllAIProcesses()
+        public static int TerminateDiscoveredAI(List<DiscoveredAIApp> targets)
         {
             int killed = 0;
-            foreach (var name in AIProcessNames)
+            var procNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var t in targets)
+            {
+                if (t.SelectedForKillSwitch && !string.IsNullOrEmpty(t.ProcessName))
+                {
+                    procNames.Add(t.ProcessName);
+                }
+            }
+
+            foreach (var name in procNames)
             {
                 try
                 {
-                    Process[] procs = Process.GetProcessesByName(name);
-                    foreach (var p in procs)
+                    foreach (var p in Process.GetProcessesByName(name))
                     {
-                        try
-                        {
-                            p.Kill();
-                            killed++;
-                        }
-                        catch { }
+                        try { p.Kill(); killed++; } catch { }
                     }
                 }
                 catch { }
@@ -366,41 +570,30 @@ namespace FakeGPS.UI
                     return output.Contains(FirewallRuleName);
                 }
             }
-            catch
-            {
-                return false;
-            }
+            catch { return false; }
         }
 
-        public static void SetFirewallBlock(bool block)
+        public static void SetFirewallBlock(bool block, List<DiscoveredAIApp> targets)
         {
             try
             {
                 RunNetsh(string.Format("advfirewall firewall delete rule name=\"{0}\"", FirewallRuleName));
-
-                if (block)
+                if (block && targets != null)
                 {
-                    string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-                    string programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
-
-                    string[] pathsToBlock = new string[]
+                    var blockedExes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var t in targets)
                     {
-                        Path.Combine(localAppData, @"Programs\Claude\Claude.exe"),
-                        Path.Combine(programFiles, @"ChatGPT\ChatGPT.exe"),
-                        Path.Combine(localAppData, @"ChatGPT\ChatGPT.exe")
-                    };
-
-                    foreach (var path in pathsToBlock)
-                    {
-                        if (File.Exists(path))
+                        if (t.SelectedForKillSwitch && !string.IsNullOrEmpty(t.ExecutablePath) && File.Exists(t.ExecutablePath))
                         {
-                            RunNetsh(string.Format("advfirewall firewall add rule name=\"{0}\" dir=out action=block program=\"{1}\" enable=yes",
-                                FirewallRuleName, path));
+                            blockedExes.Add(t.ExecutablePath);
                         }
                     }
 
-                    RunNetsh(string.Format("advfirewall firewall add rule name=\"{0}\" dir=out action=block protocol=TCP remoteport=443 description=\"FakeGPS Emergency Block\"",
-                        FirewallRuleName + "_Domains"));
+                    foreach (var exe in blockedExes)
+                    {
+                        RunNetsh(string.Format("advfirewall firewall add rule name=\"{0}\" dir=out action=block program=\"{1}\" enable=yes",
+                            FirewallRuleName, exe));
+                    }
                 }
             }
             catch { }
@@ -415,167 +608,289 @@ namespace FakeGPS.UI
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
-            using (var proc = Process.Start(psi))
-            {
-                proc.WaitForExit(4000);
-            }
+            using (var proc = Process.Start(psi)) { proc.WaitForExit(4000); }
+        }
+    }
+
+    [ComVisible(true)]
+    public class MapScriptBridge
+    {
+        private Action<double, double> onPick;
+        public MapScriptBridge(Action<double, double> onPickCallback) { onPick = onPickCallback; }
+
+        public void OnMapClick(double lat, double lon)
+        {
+            if (onPick != null) onPick(lat, lon);
         }
     }
 
     public class MainForm : Form
     {
-        private TabControl tabs;
-        private TabPage tabDashboard;
-        private TabPage tabPerApp;
-        private TabPage tabLauncher;
-        private TabPage tabKillSwitch;
-        private TabPage tabAudit;
+        // Theme Palette
+        private readonly Color BgMain = Color.FromArgb(17, 17, 21);
+        private readonly Color BgSidebar = Color.FromArgb(24, 24, 31);
+        private readonly Color BgCard = Color.FromArgb(30, 30, 38);
+        private readonly Color BorderCard = Color.FromArgb(48, 48, 60);
+        private readonly Color AccentEmerald = Color.FromArgb(16, 185, 129);
+        private readonly Color AccentIndigo = Color.FromArgb(99, 102, 241);
+        private readonly Color AccentRed = Color.FromArgb(239, 68, 68);
+        private readonly Color TextPrimary = Color.FromArgb(244, 244, 245);
+        private readonly Color TextMuted = Color.FromArgb(161, 161, 170);
 
-        // Dashboard controls
-        private Label lblDriverStatus;
-        private Label lblCurrentConfig;
-        private Label lblApiLocation;
-        private ComboBox cbPresets;
+        private Panel pnlSidebar;
+        private Panel pnlContent;
+        private List<Button> navButtons = new List<Button>();
+        private List<Panel> pages = new List<Panel>();
+
+        // Page 0: Map & GPS Controller
+        private Label lblDriverBadge;
+        private Label lblHostTzBadge;
+        private Label lblApiCoords;
+        private TextBox txtSearchCity;
+        private WebBrowser wbMap;
         private TextBox txtLat;
         private TextBox txtLon;
-        private Button btnApply;
-        private Button btnRefresh;
-        private Button btnRestartDriver;
+        private ComboBox cbPresets;
         private RichTextBox rtbLog;
 
-        // PerApp controls
+        // Page 1: Per-App Location
         private ListView lvApps;
-        private Button btnScanApps;
-        private Button btnAddCustomApp;
-        private Button btnAllowAll;
-        private Button btnDenyAll;
 
-        // Launcher controls (Per-App Timezone & Shield)
+        // Page 2: Isolated Launcher
         private ComboBox cbLauncherTz;
         private TextBox txtLauncherProxy;
         private TextBox txtCustomExe;
         private RichTextBox rtbLauncherLog;
 
-        // KillSwitch controls
-        private Label lblKillSwitchStatus;
-        private Button btnEmergencyPanic;
+        // Page 3: AI Discovery & Kill Switch
+        private ListView lvDiscoveredAI;
+        private Label lblKillSwitchBadge;
         private CheckBox chkAutoKill;
         private CheckBox chkFirewallGuard;
         private RichTextBox rtbKillSwitchLog;
-        private System.Windows.Forms.Timer guardTimer;
+        private List<DiscoveredAIApp> discoveredApps = new List<DiscoveredAIApp>();
 
-        // Audit controls
+        // Page 4: Security Audit
         private Label lblAuditGps;
+        private Label lblAuditHostTz;
         private Label lblAuditIp;
         private Label lblAuditCountry;
         private Label lblAuditVerdict;
         private Button btnRunAudit;
 
+        private System.Windows.Forms.Timer guardTimer;
+
         public MainForm()
         {
-            InitializeComponent();
-            ApplyModernDarkTheme();
+            EnableIE11WebBrowserEmulation();
+            InitializeUI();
             RefreshDashboard();
             RefreshAppList();
+            RunAIDiscovery();
             UpdateKillSwitchUI();
         }
 
-        private void InitializeComponent()
+        private void EnableIE11WebBrowserEmulation()
         {
-            this.Text = "FakeGPS Controller & AI Guard (Windows 11 Edition)";
-            this.Size = new Size(860, 680);
-            this.MinimumSize = new Size(800, 600);
+            try
+            {
+                string exeName = Path.GetFileName(Process.GetCurrentProcess().MainModule.FileName);
+                using (var key = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Internet Explorer\Main\FeatureControl\FEATURE_BROWSER_EMULATION"))
+                {
+                    if (key != null) key.SetValue(exeName, 11001, RegistryValueKind.DWord);
+                }
+            }
+            catch { }
+        }
+
+        private void InitializeUI()
+        {
+            this.Text = "FakeGPS Studio — Windows 11 Spoofer & AI Shield";
+            this.Size = new Size(1060, 740);
+            this.MinimumSize = new Size(940, 640);
             this.StartPosition = FormStartPosition.CenterScreen;
-            this.Font = new Font("Segoe UI", 9.5f, FontStyle.Regular);
+            this.BackColor = BgMain;
+            this.ForeColor = TextPrimary;
+            this.Font = new Font("Segoe UI", 9.5f);
 
-            tabs = new TabControl { Dock = DockStyle.Fill };
-            tabDashboard = new TabPage { Text = "  🛰️ GPS Контроллер  " };
-            tabPerApp = new TabPage { Text = "  🎯 Спуфинг по приложениям  " };
-            tabLauncher = new TabPage { Text = "  🚀 Изолированный лаунчер (Timezone + GPS)  " };
-            tabKillSwitch = new TabPage { Text = "  🛡️ AI Kill Switch (Claude / ChatGPT)  " };
-            tabAudit = new TabPage { Text = "  🔍 Аудит утечек  " };
+            // Sidebar
+            pnlSidebar = new Panel { Dock = DockStyle.Left, Width = 235, BackColor = BgSidebar };
+            pnlSidebar.Paint += (s, e) =>
+            {
+                using (var pen = new Pen(BorderCard, 1))
+                    e.Graphics.DrawLine(pen, pnlSidebar.Width - 1, 0, pnlSidebar.Width - 1, pnlSidebar.Height);
+            };
 
-            tabs.TabPages.Add(tabDashboard);
-            tabs.TabPages.Add(tabPerApp);
-            tabs.TabPages.Add(tabLauncher);
-            tabs.TabPages.Add(tabKillSwitch);
-            tabs.TabPages.Add(tabAudit);
+            Label lblBrand = new Label
+            {
+                Text = "🛰️ FakeGPS Studio",
+                Font = new Font("Segoe UI", 13f, FontStyle.Bold),
+                ForeColor = Color.White,
+                Location = new Point(18, 20),
+                AutoSize = true
+            };
+            Label lblSubBrand = new Label
+            {
+                Text = "Win11 • Per-App • Zero-Leak",
+                Font = new Font("Segoe UI", 8.5f),
+                ForeColor = AccentEmerald,
+                Location = new Point(21, 46),
+                AutoSize = true
+            };
+            pnlSidebar.Controls.Add(lblBrand);
+            pnlSidebar.Controls.Add(lblSubBrand);
 
-            BuildDashboardTab();
-            BuildPerAppTab();
-            BuildLauncherTab();
-            BuildKillSwitchTab();
-            BuildAuditTab();
+            pnlContent = new Panel { Dock = DockStyle.Fill, BackColor = BgMain, Padding = new Padding(20) };
 
-            this.Controls.Add(tabs);
+            this.Controls.Add(pnlContent);
+            this.Controls.Add(pnlSidebar);
 
-            guardTimer = new System.Windows.Forms.Timer();
-            guardTimer.Interval = 4000;
+            // Create Pages
+            var p0 = CreatePage();
+            var p1 = CreatePage();
+            var p2 = CreatePage();
+            var p3 = CreatePage();
+            var p4 = CreatePage();
+
+            pages.AddRange(new Panel[] { p0, p1, p2, p3, p4 });
+            foreach (var p in pages) pnlContent.Controls.Add(p);
+
+            BuildMapControllerPage(p0);
+            BuildPerAppPage(p1);
+            BuildLauncherPage(p2);
+            BuildAIDiscoveryKillSwitchPage(p3);
+            BuildAuditPage(p4);
+
+            // Sidebar Nav Buttons
+            AddNavButton("🗺️  Карта и GPS", 0, 90);
+            AddNavButton("🎯  Доступ приложений", 1, 140);
+            AddNavButton("🚀  Изоляция (Timezone)", 2, 190);
+            AddNavButton("🛡️  AI Kill Switch", 3, 240);
+            AddNavButton("🔍  Аудит утечек", 4, 290);
+
+            SelectPage(0);
+
+            guardTimer = new System.Windows.Forms.Timer { Interval = 5000 };
             guardTimer.Tick += GuardTimer_Tick;
             guardTimer.Start();
         }
 
-        private void ApplyModernDarkTheme()
+        private Panel CreatePage()
         {
-            Color darkBg = Color.FromArgb(24, 24, 27);
-            Color textLight = Color.FromArgb(244, 244, 245);
+            return new Panel { Dock = DockStyle.Fill, BackColor = BgMain, Visible = false };
+        }
 
-            this.BackColor = darkBg;
-            this.ForeColor = textLight;
-
-            foreach (TabPage tab in tabs.TabPages)
+        private void AddNavButton(string text, int pageIndex, int top)
+        {
+            var btn = new Button
             {
-                tab.BackColor = darkBg;
-                tab.ForeColor = textLight;
+                Text = "  " + text,
+                Location = new Point(12, top),
+                Size = new Size(210, 42),
+                FlatStyle = FlatStyle.Flat,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Font = new Font("Segoe UI", 10f, FontStyle.Regular),
+                ForeColor = TextMuted,
+                BackColor = BgSidebar,
+                Cursor = Cursors.Hand,
+                Tag = pageIndex
+            };
+            btn.FlatAppearance.BorderSize = 0;
+            btn.FlatAppearance.MouseOverBackColor = Color.FromArgb(35, 35, 45);
+            btn.Click += (s, e) => SelectPage((int)((Button)s).Tag);
+            navButtons.Add(btn);
+            pnlSidebar.Controls.Add(btn);
+        }
+
+        private void SelectPage(int index)
+        {
+            for (int i = 0; i < pages.Count; i++)
+            {
+                pages[i].Visible = (i == index);
+                if (i == index)
+                {
+                    navButtons[i].BackColor = Color.FromArgb(42, 42, 56);
+                    navButtons[i].ForeColor = Color.White;
+                    navButtons[i].Font = new Font("Segoe UI", 10f, FontStyle.Bold);
+                }
+                else
+                {
+                    navButtons[i].BackColor = BgSidebar;
+                    navButtons[i].ForeColor = TextMuted;
+                    navButtons[i].Font = new Font("Segoe UI", 10f, FontStyle.Regular);
+                }
             }
         }
 
-        private void BuildDashboardTab()
+        private Panel CreateCard(int x, int y, int w, int h, AnchorStyles anchor = AnchorStyles.Top | AnchorStyles.Left)
         {
-            Panel pnlTop = new Panel { Dock = DockStyle.Top, Height = 140, Padding = new Padding(15) };
-            
-            lblDriverStatus = new Label { Location = new Point(15, 12), AutoSize = true, Font = new Font("Segoe UI", 11f, FontStyle.Bold) };
-            lblCurrentConfig = new Label { Location = new Point(15, 45), AutoSize = true };
-            lblApiLocation = new Label { Location = new Point(15, 75), AutoSize = true };
+            var card = new Panel
+            {
+                Location = new Point(x, y),
+                Size = new Size(w, h),
+                BackColor = BgCard,
+                Anchor = anchor
+            };
+            card.Paint += (s, e) =>
+            {
+                using (var pen = new Pen(BorderCard, 1))
+                    e.Graphics.DrawRectangle(pen, 0, 0, card.Width - 1, card.Height - 1);
+            };
+            return card;
+        }
 
-            btnRefresh = new Button { Text = "🔄 Обновить статус", Location = new Point(620, 15), Size = new Size(180, 34) };
+        private Button CreateStyledButton(string text, int x, int y, int w, int h, Color bg)
+        {
+            var b = new Button
+            {
+                Text = text,
+                Location = new Point(x, y),
+                Size = new Size(w, h),
+                BackColor = bg,
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+                Cursor = Cursors.Hand
+            };
+            b.FlatAppearance.BorderSize = 0;
+            return b;
+        }
+
+        private void BuildMapControllerPage(Panel page)
+        {
+            // Status Header Card
+            var cardStatus = CreateCard(0, 0, 780, 75, AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right);
+            lblDriverBadge = new Label { Location = new Point(16, 12), AutoSize = true, Font = new Font("Segoe UI", 10.5f, FontStyle.Bold), Text = "● Проверка драйвера..." };
+            lblHostTzBadge = new Label { Location = new Point(16, 42), AutoSize = true, ForeColor = TextMuted, Text = "Системный часовой пояс Windows: ..." };
+            lblApiCoords = new Label { Location = new Point(360, 14), AutoSize = true, ForeColor = AccentEmerald, Font = new Font("Consolas", 9.5f), Text = "Windows API: ..." };
+
+            var btnRefresh = CreateStyledButton("🔄 Обновить", 640, 18, 125, 36, Color.FromArgb(55, 55, 70));
+            btnRefresh.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             btnRefresh.Click += (s, e) => RefreshDashboard();
 
-            btnRestartDriver = new Button { Text = "⚡ Перезапуск драйвера", Location = new Point(620, 58), Size = new Size(180, 34) };
-            btnRestartDriver.Click += (s, e) =>
-            {
-                Log("Перезапуск PnP узла драйвера FakeGPS...");
-                bool ok = FakeGPSCore.RestartDevice();
-                Log(ok ? "Драйвер успешно перезапущен!" : "Не удалось перезапустить драйвер через pnputil.");
-                RefreshDashboard();
-            };
+            cardStatus.Controls.AddRange(new Control[] { lblDriverBadge, lblHostTzBadge, lblApiCoords, btnRefresh });
 
-            pnlTop.Controls.AddRange(new Control[] { lblDriverStatus, lblCurrentConfig, lblApiLocation, btnRefresh, btnRestartDriver });
+            // Search & Presets Card
+            var cardControls = CreateCard(0, 88, 780, 105, AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right);
 
-            GroupBox gb = new GroupBox
-            {
-                Text = "Выбор координат (Нидерланды и мир)",
-                Location = new Point(15, 150),
-                Size = new Size(810, 160),
-                ForeColor = Color.White
-            };
+            Label lblSearch = new Label { Text = "Поиск города (OpenStreetMap):", Location = new Point(16, 14), AutoSize = true, ForeColor = TextMuted };
+            txtSearchCity = new TextBox { Location = new Point(215, 11), Width = 240, BackColor = BgMain, ForeColor = Color.White, BorderStyle = BorderStyle.FixedSingle };
+            var btnSearch = CreateStyledButton("Найти", 465, 10, 80, 26, AccentIndigo);
+            btnSearch.Click += (s, e) => SearchCityOnMap();
 
-            Label lblPresets = new Label { Text = "Быстрый пресет:", Location = new Point(20, 30), AutoSize = true };
-            cbPresets = new ComboBox { Location = new Point(160, 27), Width = 380, DropDownStyle = ComboBoxStyle.DropDownList };
-            
+            cbPresets = new ComboBox { Location = new Point(560, 11), Width = 205, DropDownStyle = ComboBoxStyle.DropDownList, BackColor = BgMain, ForeColor = Color.White };
+            cbPresets.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             var presets = new LatLong[]
             {
-                new LatLong(52.379189, 4.899431, "🇳🇱 Нидерланды — Амстердам (Центр)"),
-                new LatLong(51.924420, 4.477733, "🇳🇱 Нидерланды — Роттердам"),
-                new LatLong(52.070498, 4.300699, "🇳🇱 Нидерланды — Гаага (The Hague)"),
-                new LatLong(52.090737, 5.121420, "🇳🇱 Нидерланды — Утрехт"),
-                new LatLong(51.441642, 5.469722, "🇳🇱 Нидерланды — Эйндховен"),
-                new LatLong(51.507351, -0.127758, "🇬🇧 Великобритания — Лондон"),
-                new LatLong(50.110922, 8.682127, "🇩🇪 Германия — Франкфурт"),
-                new LatLong(40.712776, -74.005974, "🇺🇸 США — Нью-Йорк"),
-                new LatLong(35.676192, 139.650311, "🇯🇵 Япония — Токио")
+                new LatLong(52.379189, 4.899431, "🇳🇱 Амстердам (Нидерланды)", "Europe/Amsterdam"),
+                new LatLong(51.924420, 4.477733, "🇳🇱 Роттердам (Нидерланды)", "Europe/Amsterdam"),
+                new LatLong(52.070498, 4.300699, "🇳🇱 Гаага (Нидерланды)", "Europe/Amsterdam"),
+                new LatLong(52.090737, 5.121420, "🇳🇱 Утрехт (Нидерланды)", "Europe/Amsterdam"),
+                new LatLong(51.507351, -0.127758, "🇬🇧 Лондон", "Europe/London"),
+                new LatLong(50.110922, 8.682127, "🇩🇪 Франкфурт", "Europe/Berlin"),
+                new LatLong(40.712776, -74.005974, "🇺🇸 Нью-Йорк", "America/New_York"),
+                new LatLong(35.676192, 139.650311, "🇯🇵 Токио", "Asia/Tokyo")
             };
-
             foreach (var p in presets) cbPresets.Items.Add(p);
             cbPresets.SelectedIndex = 0;
             cbPresets.SelectedIndexChanged += (s, e) =>
@@ -585,76 +900,191 @@ namespace FakeGPS.UI
                 {
                     txtLat.Text = sel.Latitude.ToString(CultureInfo.InvariantCulture);
                     txtLon.Text = sel.Longitude.ToString(CultureInfo.InvariantCulture);
+                    MoveMapMarker(sel.Latitude, sel.Longitude);
                 }
             };
 
-            Label lblLat = new Label { Text = "Широта (Lat):", Location = new Point(20, 72), AutoSize = true };
-            txtLat = new TextBox { Location = new Point(160, 69), Width = 170, Text = "52.379189" };
+            Label lblLat = new Label { Text = "Широта:", Location = new Point(16, 56), AutoSize = true, ForeColor = TextMuted };
+            txtLat = new TextBox { Location = new Point(78, 53), Width = 135, Text = "52.379189", BackColor = BgMain, ForeColor = Color.White, BorderStyle = BorderStyle.FixedSingle, Font = new Font("Consolas", 10f) };
 
-            Label lblLon = new Label { Text = "Долгота (Lon):", Location = new Point(350, 72), AutoSize = true };
-            txtLon = new TextBox { Location = new Point(460, 69), Width = 170, Text = "4.899431" };
+            Label lblLon = new Label { Text = "Долгота:", Location = new Point(225, 56), AutoSize = true, ForeColor = TextMuted };
+            txtLon = new TextBox { Location = new Point(290, 53), Width = 135, Text = "4.899431", BackColor = BgMain, ForeColor = Color.White, BorderStyle = BorderStyle.FixedSingle, Font = new Font("Consolas", 10f) };
 
-            btnApply = new Button
+            var btnApply = CreateStyledButton("🚀 Применить координаты GPS", 445, 48, 320, 36, AccentEmerald);
+            btnApply.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            btnApply.Click += (s, e) => ApplyCoordinatesFromUI();
+
+            cardControls.Controls.AddRange(new Control[] { lblSearch, txtSearchCity, btnSearch, cbPresets, lblLat, txtLat, lblLon, txtLon, btnApply });
+
+            // Interactive Leaflet Map Card
+            var cardMap = CreateCard(0, 205, 780, 345, AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right);
+            wbMap = new WebBrowser
             {
-                Text = "🚀 Применить геолокацию в системе",
-                Location = new Point(160, 108),
-                Size = new Size(300, 38),
-                BackColor = Color.FromArgb(16, 185, 129),
-                ForeColor = Color.White,
-                FlatStyle = FlatStyle.Flat
+                Dock = DockStyle.Fill,
+                ScriptErrorsSuppressed = true,
+                IsWebBrowserContextMenuEnabled = false
             };
-            btnApply.Click += (s, e) =>
+            wbMap.ObjectForScripting = new MapScriptBridge((lat, lon) =>
             {
-                try
+                this.Invoke((MethodInvoker)delegate
                 {
-                    double lat = double.Parse(txtLat.Text.Trim(), CultureInfo.InvariantCulture);
-                    double lon = double.Parse(txtLon.Text.Trim(), CultureInfo.InvariantCulture);
+                    txtLat.Text = lat.ToString("F6", CultureInfo.InvariantCulture);
+                    txtLon.Text = lon.ToString("F6", CultureInfo.InvariantCulture);
+                    Log(string.Format("Выбрана точка на карте: {0}, {1}", txtLat.Text, txtLon.Text));
+                });
+            });
+            LoadLeafletMap(52.379189, 4.899431);
+            cardMap.Controls.Add(wbMap);
 
-                    string instanceId;
-                    FakeGPSCore.SetCoordinates(lat, lon, out instanceId);
-                    Log(string.Format("Успешно записаны координаты: {0}, {1} (Устройство: {2})", lat, lon, instanceId));
-                    Log("Драйвер перезапущен. Проверка Windows Location API...");
-                    RefreshDashboard();
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show(this, "Ошибка ввода: " + ex.Message, "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                }
-            };
-
-            gb.Controls.AddRange(new Control[] { lblPresets, cbPresets, lblLat, txtLat, lblLon, txtLon, btnApply });
-
+            // Log Box
             rtbLog = new RichTextBox
             {
-                Location = new Point(15, 325),
-                Size = new Size(810, 270),
-                BackColor = Color.FromArgb(15, 15, 18),
-                ForeColor = Color.FromArgb(161, 161, 170),
-                Font = new Font("Consolas", 9f),
+                Location = new Point(0, 560),
+                Size = new Size(780, 95),
+                Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
+                BackColor = Color.FromArgb(14, 14, 18),
+                ForeColor = TextMuted,
+                BorderStyle = BorderStyle.None,
+                Font = new Font("Consolas", 8.5f),
                 ReadOnly = true
             };
 
-            tabDashboard.Controls.AddRange(new Control[] { pnlTop, gb, rtbLog });
+            page.Controls.AddRange(new Control[] { cardStatus, cardControls, cardMap, rtbLog });
         }
 
-        private void BuildPerAppTab()
+        private void LoadLeafletMap(double initLat, double initLon)
         {
-            Panel pnlHeader = new Panel { Dock = DockStyle.Top, Height = 90, Padding = new Padding(15) };
+            string html = string.Format(CultureInfo.InvariantCulture, @"<!DOCTYPE html>
+<html>
+<head>
+<meta http-equiv='X-UA-Compatible' content='IE=edge' />
+<meta charset='utf-8' />
+<link rel='stylesheet' href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css' />
+<script src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'></script>
+<style>
+  html, body, #map {{ height: 100%; margin: 0; padding: 0; background: #141418; }}
+  .leaflet-tile-pane {{ filter: brightness(0.92) contrast(1.05); }}
+</style>
+</head>
+<body>
+<div id='map'></div>
+<script>
+  var map = L.map('map').setView([{0}, {1}], 12);
+  L.tileLayer('https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap'
+  }}).addTo(map);
+
+  var marker = L.marker([{0}, {1}], {{ draggable: true }}).addTo(map);
+
+  map.on('click', function(e) {{
+      marker.setLatLng(e.latlng);
+      if (window.external && window.external.OnMapClick) {{
+          window.external.OnMapClick(e.latlng.lat, e.latlng.lng);
+      }}
+  }});
+
+  marker.on('dragend', function(e) {{
+      var pos = marker.getLatLng();
+      if (window.external && window.external.OnMapClick) {{
+          window.external.OnMapClick(pos.lat, pos.lng);
+      }}
+  }});
+
+  function setMarker(lat, lon) {{
+      var ll = L.latLng(lat, lon);
+      marker.setLatLng(ll);
+      map.setView(ll, 12);
+  }}
+</script>
+</body>
+</html>", initLat, initLon);
+
+            wbMap.DocumentText = html;
+        }
+
+        private void MoveMapMarker(double lat, double lon)
+        {
+            try
+            {
+                if (wbMap.Document != null)
+                {
+                    wbMap.Document.InvokeScript("setMarker", new object[] { lat, lon });
+                }
+            }
+            catch { }
+        }
+
+        private void SearchCityOnMap()
+        {
+            string query = txtSearchCity.Text.Trim();
+            if (string.IsNullOrEmpty(query)) return;
+
+            Log("Поиск через OpenStreetMap Nominatim: " + query + "...");
+            ThreadPool.QueueUserWorkItem(state =>
+            {
+                try
+                {
+                    var results = OpenMapGeocoder.Search(query);
+                    this.Invoke((MethodInvoker)delegate
+                    {
+                        if (results.Count > 0)
+                        {
+                            var first = results[0];
+                            txtLat.Text = first.Latitude.ToString("F6", CultureInfo.InvariantCulture);
+                            txtLon.Text = first.Longitude.ToString("F6", CultureInfo.InvariantCulture);
+                            MoveMapMarker(first.Latitude, first.Longitude);
+                            Log("Найдено: " + first.Name);
+                        }
+                        else
+                        {
+                            Log("Локация не найдена по запросу: " + query);
+                        }
+                    });
+                }
+                catch (Exception ex)
+                {
+                    this.Invoke((MethodInvoker)delegate { Log("Ошибка поиска OpenStreetMap: " + ex.Message); });
+                }
+            });
+        }
+
+        private void ApplyCoordinatesFromUI()
+        {
+            try
+            {
+                double lat = double.Parse(txtLat.Text.Trim(), CultureInfo.InvariantCulture);
+                double lon = double.Parse(txtLon.Text.Trim(), CultureInfo.InvariantCulture);
+
+                string instanceId;
+                FakeGPSCore.SetCoordinates(lat, lon, out instanceId);
+                MoveMapMarker(lat, lon);
+                Log(string.Format("Координаты {0}, {1} применены на сенсор {2}!", lat, lon, instanceId));
+                RefreshDashboard();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, "Ошибка: " + ex.Message, "FakeGPS", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void BuildPerAppPage(Panel page)
+        {
+            var cardTop = CreateCard(0, 0, 780, 95, AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right);
             Label lblInfo = new Label
             {
-                Text = "Управление доступом к геолокации Windows для каждого приложения.\n" +
-                       "Приложения с отметкой 'Разрешить' получают спуфленный GPS. Приложения с 'Запретить' не могут определить позицию.",
+                Text = "Точечное разрешение Windows Location API (ConsentStore).\nПриложения с галочкой получают спуфленный GPS; без галочки — полностью заблокированы.",
+                Location = new Point(16, 12),
                 AutoSize = true,
-                Location = new Point(15, 10)
+                ForeColor = TextMuted
             };
+            var btnScan = CreateStyledButton("🔄 Сканировать", 16, 52, 130, 30, Color.FromArgb(55, 55, 70));
+            btnScan.Click += (s, e) => RefreshAppList();
 
-            btnScanApps = new Button { Text = "🔄 Обновить список", Location = new Point(15, 50), Size = new Size(150, 30) };
-            btnScanApps.Click += (s, e) => RefreshAppList();
-
-            btnAddCustomApp = new Button { Text = "➕ Добавить приложение (.exe)", Location = new Point(180, 50), Size = new Size(210, 30) };
-            btnAddCustomApp.Click += (s, e) =>
+            var btnAdd = CreateStyledButton("➕ Добавить .exe", 156, 52, 140, 30, AccentIndigo);
+            btnAdd.Click += (s, e) =>
             {
-                using (var ofd = new OpenFileDialog { Filter = "Executable Files (*.exe)|*.exe|All files (*.*)|*.*" })
+                using (var ofd = new OpenFileDialog { Filter = "Programs (*.exe)|*.exe" })
                 {
                     if (ofd.ShowDialog() == DialogResult.OK)
                     {
@@ -664,26 +1094,27 @@ namespace FakeGPS.UI
                 }
             };
 
-            btnAllowAll = new Button { Text = "Разрешить всем", Location = new Point(410, 50), Size = new Size(140, 30) };
-            btnAllowAll.Click += (s, e) => ToggleAllApps(true);
+            var btnDenyAll = CreateStyledButton("Запретить всем", 620, 52, 140, 30, AccentRed);
+            btnDenyAll.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            btnDenyAll.Click += (s, e) => { foreach (ListViewItem it in lvApps.Items) it.Checked = false; };
 
-            btnDenyAll = new Button { Text = "Запретить всем", Location = new Point(560, 50), Size = new Size(140, 30) };
-            btnDenyAll.Click += (s, e) => ToggleAllApps(false);
-
-            pnlHeader.Controls.AddRange(new Control[] { lblInfo, btnScanApps, btnAddCustomApp, btnAllowAll, btnDenyAll });
+            cardTop.Controls.AddRange(new Control[] { lblInfo, btnScan, btnAdd, btnDenyAll });
 
             lvApps = new ListView
             {
-                Dock = DockStyle.Fill,
+                Location = new Point(0, 108),
+                Size = new Size(780, 545),
+                Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
                 View = View.Details,
                 CheckBoxes = true,
                 FullRowSelect = true,
-                BackColor = Color.FromArgb(15, 15, 18),
-                ForeColor = Color.White
+                BackColor = BgCard,
+                ForeColor = TextPrimary,
+                BorderStyle = BorderStyle.None
             };
-            lvApps.Columns.Add("Доступ (FakeGPS)", 130);
-            lvApps.Columns.Add("Приложение", 180);
-            lvApps.Columns.Add("Полный путь", 480);
+            lvApps.Columns.Add("Доступ GPS", 120);
+            lvApps.Columns.Add("Приложение", 190);
+            lvApps.Columns.Add("Путь к файлу", 450);
 
             lvApps.ItemChecked += (s, e) =>
             {
@@ -699,336 +1130,223 @@ namespace FakeGPS.UI
                 }
             };
 
-            tabPerApp.Controls.Add(lvApps);
-            tabPerApp.Controls.Add(pnlHeader);
+            page.Controls.AddRange(new Control[] { cardTop, lvApps });
         }
 
-        private void BuildLauncherTab()
+        private void BuildLauncherPage(Panel page)
         {
-            Panel pnl = new Panel { Dock = DockStyle.Fill, Padding = new Padding(20) };
-
+            var cardInfo = CreateCard(0, 0, 780, 90, AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right);
             Label lblTitle = new Label
             {
-                Text = "Изолированный запуск приложений (Спуфинг Timezone + GPS без изменения системы)",
-                Font = new Font("Segoe UI", 11.5f, FontStyle.Bold),
-                Location = new Point(20, 15),
+                Text = "Изолированный запуск: отдельный Timezone + GPS без изменения системы",
+                Font = new Font("Segoe UI", 11f, FontStyle.Bold),
+                Location = new Point(16, 12),
                 AutoSize = true
             };
-
             Label lblDesc = new Label
             {
-                Text = "Запускает процесс с индивидуальным часовым поясом (V8 / Chromium Intl.DateTimeFormat),\n" +
-                       "передает спуфленный GPS из FakeGPS, блокирует WebRTC утечки и Wi-Fi триангуляцию.\n" +
-                       "Системные часы и настройки Windows остаются нетронутыми!",
-                Location = new Point(20, 48),
+                Text = "Часы и часовой пояс Windows не меняются. Подменяются только TZ/V8, WebView2 и отключаются WebRTC/Wi-Fi утечки.",
+                Location = new Point(16, 44),
                 AutoSize = true,
-                ForeColor = Color.FromArgb(161, 161, 170)
+                ForeColor = TextMuted
             };
+            cardInfo.Controls.AddRange(new Control[] { lblTitle, lblDesc });
 
-            GroupBox gbSettings = new GroupBox
+            var cardCfg = CreateCard(0, 102, 780, 110, AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right);
+            Label lblTz = new Label { Text = "Часовой пояс (TZ):", Location = new Point(16, 20), AutoSize = true, ForeColor = TextMuted };
+            cbLauncherTz = new ComboBox { Location = new Point(190, 17), Width = 340, DropDownStyle = ComboBoxStyle.DropDownList, BackColor = BgMain, ForeColor = Color.White };
+            cbLauncherTz.Items.AddRange(new object[]
             {
-                Text = "Параметры изолированного окружения",
-                Location = new Point(20, 115),
-                Size = new Size(800, 110),
-                ForeColor = Color.White
-            };
-
-            Label lblTz = new Label { Text = "Часовой пояс (Timezone):", Location = new Point(20, 30), AutoSize = true };
-            cbLauncherTz = new ComboBox { Location = new Point(210, 27), Width = 320, DropDownStyle = ComboBoxStyle.DropDownList };
-            cbLauncherTz.Items.Add("Europe/Amsterdam (Нидерланды, CET UTC+1)");
-            cbLauncherTz.Items.Add("Europe/London (Великобритания, GMT UTC+0)");
-            cbLauncherTz.Items.Add("Europe/Berlin (Германия, CET UTC+1)");
-            cbLauncherTz.Items.Add("Europe/Paris (Франция, CET UTC+1)");
-            cbLauncherTz.Items.Add("America/New_York (США Восток, EST UTC-5)");
-            cbLauncherTz.Items.Add("Asia/Tokyo (Япония, JST UTC+9)");
+                "Europe/Amsterdam (Нидерланды, CET UTC+1)",
+                "Europe/London (Великобритания, GMT UTC+0)",
+                "Europe/Berlin (Германия, CET UTC+1)",
+                "America/New_York (США, EST UTC-5)",
+                "Asia/Tokyo (Япония, JST UTC+9)"
+            });
             cbLauncherTz.SelectedIndex = 0;
 
-            Label lblProxy = new Label { Text = "SOCKS5 / HTTP Proxy:", Location = new Point(20, 68), AutoSize = true };
-            txtLauncherProxy = new TextBox { Location = new Point(210, 65), Width = 320, Text = "" };
-            Label lblProxyHint = new Label { Text = "(Опционально. Пример: socks5://127.0.0.1:10808)", Location = new Point(540, 68), AutoSize = true, ForeColor = Color.Gray };
+            Label lblProxy = new Label { Text = "SOCKS5 / HTTP Proxy:", Location = new Point(16, 62), AutoSize = true, ForeColor = TextMuted };
+            txtLauncherProxy = new TextBox { Location = new Point(190, 59), Width = 340, BackColor = BgMain, ForeColor = Color.White, BorderStyle = BorderStyle.FixedSingle };
+            Label lblHint = new Label { Text = "Опционально (пример: socks5://127.0.0.1:10808)", Location = new Point(540, 62), AutoSize = true, ForeColor = TextMuted };
 
-            gbSettings.Controls.AddRange(new Control[] { lblTz, cbLauncherTz, lblProxy, txtLauncherProxy, lblProxyHint });
+            cardCfg.Controls.AddRange(new Control[] { lblTz, cbLauncherTz, lblProxy, txtLauncherProxy, lblHint });
 
-            // Launch buttons group
-            GroupBox gbActions = new GroupBox
+            var cardActions = CreateCard(0, 224, 780, 150, AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right);
+            var btnChatGPT = CreateStyledButton("🤖 Запустить ChatGPT (Isolated TZ)", 16, 20, 360, 44, AccentEmerald);
+            btnChatGPT.Click += (s, e) =>
             {
-                Text = "Быстрый защищенный запуск",
-                Location = new Point(20, 235),
-                Size = new Size(800, 150),
-                ForeColor = Color.White
-            };
-
-            Button btnLaunchChatGPT = new Button
-            {
-                Text = "🤖 Запустить ChatGPT (WebView2 / App)",
-                Location = new Point(20, 30),
-                Size = new Size(360, 42),
-                BackColor = Color.FromArgb(16, 185, 129),
-                ForeColor = Color.White,
-                FlatStyle = FlatStyle.Flat,
-                Font = new Font("Segoe UI", 10f, FontStyle.Bold)
-            };
-            btnLaunchChatGPT.Click += (s, e) =>
-            {
-                string tz = GetSelectedTimezone();
+                string tz = cbLauncherTz.SelectedItem.ToString().Split(' ')[0];
                 string proxy = txtLauncherProxy.Text.Trim();
-
-                LogLauncher(string.Format("Запуск ChatGPT с часовым поясом '{0}'...", tz));
-                // Try launching ChatGPT via ms-windows-store uri or direct executable
-                string appxPath = @"C:\Program Files\WindowsApps\OpenAI.Codex_26.1111.2228.0_x64__2p2nqsd0c76g0\app\ChatGPT.exe";
-                if (File.Exists(appxPath))
+                string appx = @"C:\Program Files\WindowsApps\OpenAI.Codex_26.1111.2228.0_x64__2p2nqsd0c76g0\app\ChatGPT.exe";
+                if (File.Exists(appx))
                 {
-                    IsolatedAppLauncher.LaunchWithSpoofing(appxPath, "", tz, proxy);
-                    LogLauncher("ChatGPT запущен в изолированном режиме с параметрами анти-детекта.");
+                    IsolatedAppLauncher.LaunchWithSpoofing(appx, "", tz, proxy);
+                    LogLauncher("ChatGPT запущен с TZ=" + tz);
                 }
                 else
                 {
-                    // Launch browser ChatGPT
                     string browser = IsolatedAppLauncher.FindBrowserPath();
                     if (!string.IsNullOrEmpty(browser))
                     {
                         IsolatedAppLauncher.LaunchWithSpoofing(browser, "https://chatgpt.com", tz, proxy);
-                        LogLauncher("ChatGPT запущен в защищенном окне браузера: " + browser);
-                    }
-                    else
-                    {
-                        LogLauncher("Не удалось найти исполняемый файл ChatGPT или браузера.");
+                        LogLauncher("ChatGPT запущен в защищенном браузере с TZ=" + tz);
                     }
                 }
             };
 
-            Button btnLaunchClaude = new Button
+            var btnClaude = CreateStyledButton("🧠 Запустить Claude (Clean Profile + TZ)", 400, 20, 360, 44, AccentIndigo);
+            btnClaude.Click += (s, e) =>
             {
-                Text = "🧠 Запустить Claude (Браузер с Amsterdam TZ + GPS)",
-                Location = new Point(410, 30),
-                Size = new Size(360, 42),
-                BackColor = Color.FromArgb(139, 92, 246),
-                ForeColor = Color.White,
-                FlatStyle = FlatStyle.Flat,
-                Font = new Font("Segoe UI", 10f, FontStyle.Bold)
-            };
-            btnLaunchClaude.Click += (s, e) =>
-            {
-                string tz = GetSelectedTimezone();
+                string tz = cbLauncherTz.SelectedItem.ToString().Split(' ')[0];
                 string proxy = txtLauncherProxy.Text.Trim();
                 string browser = IsolatedAppLauncher.FindBrowserPath();
-
                 if (!string.IsNullOrEmpty(browser))
                 {
-                    string profileDir = Path.Combine(Path.GetTempPath(), "FakeGPS_Claude_Profile");
-                    string args = string.Format("https://claude.ai --user-data-dir=\"{0}\"", profileDir);
-                    IsolatedAppLauncher.LaunchWithSpoofing(browser, args, tz, proxy);
-                    LogLauncher("Claude запущен в чистом профиле с часовым поясом " + tz + " и защитой WebRTC.");
-                }
-                else
-                {
-                    LogLauncher("Браузер (Brave / Chrome / Edge) не найден.");
+                    string profile = Path.Combine(Path.GetTempPath(), "FakeGPS_Claude_Profile");
+                    IsolatedAppLauncher.LaunchWithSpoofing(browser, string.Format("https://claude.ai --user-data-dir=\"{0}\"", profile), tz, proxy);
+                    LogLauncher("Claude запущен в изолированном профиле [TZ=" + tz + "]");
                 }
             };
 
-            Label lblCustom = new Label { Text = "Свой .EXE:", Location = new Point(20, 95), AutoSize = true };
-            txtCustomExe = new TextBox { Location = new Point(100, 92), Width = 370 };
-            Button btnBrowseCustom = new Button { Text = "Обзор...", Location = new Point(480, 90), Size = new Size(90, 30) };
-            btnBrowseCustom.Click += (s, e) =>
+            txtCustomExe = new TextBox { Location = new Point(16, 92), Width = 440, BackColor = BgMain, ForeColor = Color.White, BorderStyle = BorderStyle.FixedSingle };
+            var btnBrowse = CreateStyledButton("Обзор...", 468, 90, 90, 28, Color.FromArgb(55, 55, 70));
+            btnBrowse.Click += (s, e) =>
             {
                 using (var ofd = new OpenFileDialog { Filter = "Programs (*.exe)|*.exe" })
                 {
-                    if (ofd.ShowDialog() == DialogResult.OK)
-                    {
-                        txtCustomExe.Text = ofd.FileName;
-                    }
+                    if (ofd.ShowDialog() == DialogResult.OK) txtCustomExe.Text = ofd.FileName;
+                }
+            };
+            var btnRunCustom = CreateStyledButton("🚀 Запустить EXE", 570, 90, 190, 28, AccentEmerald);
+            btnRunCustom.Click += (s, e) =>
+            {
+                if (File.Exists(txtCustomExe.Text.Trim()))
+                {
+                    string tz = cbLauncherTz.SelectedItem.ToString().Split(' ')[0];
+                    IsolatedAppLauncher.LaunchWithSpoofing(txtCustomExe.Text.Trim(), "", tz, txtLauncherProxy.Text.Trim());
+                    LogLauncher("Запущено: " + Path.GetFileName(txtCustomExe.Text) + " [TZ=" + tz + "]");
                 }
             };
 
-            Button btnLaunchCustom = new Button { Text = "🚀 Запустить изолированно", Location = new Point(585, 90), Size = new Size(185, 30) };
-            btnLaunchCustom.Click += (s, e) =>
-            {
-                string path = txtCustomExe.Text.Trim();
-                if (File.Exists(path))
-                {
-                    string tz = GetSelectedTimezone();
-                    string proxy = txtLauncherProxy.Text.Trim();
-                    IsolatedAppLauncher.LaunchWithSpoofing(path, "", tz, proxy);
-                    LogLauncher(string.Format("Запущено: {0} [TZ={1}]", Path.GetFileName(path), tz));
-                }
-                else
-                {
-                    MessageBox.Show(this, "Укажите существующий путь к .exe файлу.", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                }
-            };
-
-            gbActions.Controls.AddRange(new Control[]
-            {
-                btnLaunchChatGPT, btnLaunchClaude, lblCustom, txtCustomExe, btnBrowseCustom, btnLaunchCustom
-            });
+            cardActions.Controls.AddRange(new Control[] { btnChatGPT, btnClaude, txtCustomExe, btnBrowse, btnRunCustom });
 
             rtbLauncherLog = new RichTextBox
             {
-                Location = new Point(20, 395),
-                Size = new Size(800, 200),
-                BackColor = Color.FromArgb(15, 15, 18),
+                Location = new Point(0, 388),
+                Size = new Size(780, 265),
+                Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
+                BackColor = Color.FromArgb(14, 14, 18),
                 ForeColor = Color.FromArgb(96, 165, 250),
+                BorderStyle = BorderStyle.None,
                 Font = new Font("Consolas", 9f),
                 ReadOnly = true
             };
 
-            pnl.Controls.AddRange(new Control[] { lblTitle, lblDesc, gbSettings, gbActions, rtbLauncherLog });
-            tabLauncher.Controls.Add(pnl);
+            page.Controls.AddRange(new Control[] { cardInfo, cardCfg, cardActions, rtbLauncherLog });
         }
 
-        private string GetSelectedTimezone()
+        private void BuildAIDiscoveryKillSwitchPage(Panel page)
         {
-            string txt = cbLauncherTz.SelectedItem.ToString();
-            int idx = txt.IndexOf(' ');
-            return (idx > 0) ? txt.Substring(0, idx) : "Europe/Amsterdam";
-        }
+            var cardTop = CreateCard(0, 0, 780, 130, AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right);
+            lblKillSwitchBadge = new Label { Location = new Point(16, 12), AutoSize = true, Font = new Font("Segoe UI", 11f, FontStyle.Bold) };
 
-        private void BuildKillSwitchTab()
-        {
-            Panel pnl = new Panel { Dock = DockStyle.Fill, Padding = new Padding(20) };
-
-            lblKillSwitchStatus = new Label
+            var btnPanic = CreateStyledButton("🚨 АВАРИЙНЫЙ KILL SWITCH (Убить выбранные AI + Блок Firewall)", 16, 48, 490, 42, AccentRed);
+            btnPanic.Click += (s, e) =>
             {
-                Text = "Статус AI Guard: АКТИВЕН",
-                Font = new Font("Segoe UI", 12f, FontStyle.Bold),
-                ForeColor = Color.FromArgb(16, 185, 129),
-                Location = new Point(20, 20),
-                AutoSize = true
-            };
-
-            Label lblDesc = new Label
-            {
-                Text = "Kill Switch мгновенно защищает ваши аккаунты Claude, ChatGPT и других нейросетей от бана.\n" +
-                       "Если FakeGPS отключится или произойдет утечка, защита закроет процессы или заблокирует сеть.",
-                Location = new Point(20, 55),
-                AutoSize = true
-            };
-
-            btnEmergencyPanic = new Button
-            {
-                Text = "🚨 АВАРИЙНЫЙ KILL SWITCH\n(Немедленно завершить Claude, ChatGPT и включить Firewall Block)",
-                Location = new Point(20, 110),
-                Size = new Size(540, 60),
-                BackColor = Color.FromArgb(239, 68, 68),
-                ForeColor = Color.White,
-                Font = new Font("Segoe UI", 10.5f, FontStyle.Bold),
-                FlatStyle = FlatStyle.Flat
-            };
-            btnEmergencyPanic.Click += (s, e) =>
-            {
-                int killed = AIKillSwitch.TerminateAllAIProcesses();
-                AIKillSwitch.SetFirewallBlock(true);
-                LogKillSwitch(string.Format("🚨 ВЫЗВАН АВАРИЙНЫЙ KILL SWITCH! Завершено процессов нейросетей: {0}. Включена блокировка фаервола.", killed));
+                int killed = AIKillSwitch.TerminateDiscoveredAI(discoveredApps);
+                AIKillSwitch.SetFirewallBlock(true, discoveredApps);
+                LogKillSwitch(string.Format("🚨 KILL SWITCH АКТИВИРОВАН! Завершено процессов: {0}. Трафик заблокирован.", killed));
                 UpdateKillSwitchUI();
+                RunAIDiscovery();
             };
 
-            Button btnUnlock = new Button
-            {
-                Text = "Снять блокировку Firewall",
-                Location = new Point(575, 120),
-                Size = new Size(185, 40)
-            };
+            var btnUnlock = CreateStyledButton("Снять блок Firewall", 518, 48, 140, 42, Color.FromArgb(55, 55, 70));
             btnUnlock.Click += (s, e) =>
             {
-                AIKillSwitch.SetFirewallBlock(false);
-                LogKillSwitch("Блокировка Firewall снята.");
+                AIKillSwitch.SetFirewallBlock(false, discoveredApps);
+                LogKillSwitch("Сетевая блокировка Firewall снята.");
                 UpdateKillSwitchUI();
             };
 
-            chkAutoKill = new CheckBox
+            var btnRescan = CreateStyledButton("🔄 Найти AI", 668, 48, 96, 42, AccentIndigo);
+            btnRescan.Click += (s, e) => RunAIDiscovery();
+
+            chkAutoKill = new CheckBox { Text = "Авто-убийство процессов при сбое FakeGPS", Location = new Point(16, 98), AutoSize = true, Checked = true };
+            chkFirewallGuard = new CheckBox { Text = "Авто-блокировка Firewall при сбое датчика", Location = new Point(360, 98), AutoSize = true, Checked = false };
+
+            cardTop.Controls.AddRange(new Control[] { lblKillSwitchBadge, btnPanic, btnUnlock, btnRescan, chkAutoKill, chkFirewallGuard });
+
+            lvDiscoveredAI = new ListView
             {
-                Text = "Авто-ликвидация: Закрывать Claude и ChatGPT при падении драйвера FakeGPS",
-                Location = new Point(25, 190),
-                AutoSize = true,
-                Checked = true
+                Location = new Point(0, 142),
+                Size = new Size(780, 320),
+                Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
+                View = View.Details,
+                CheckBoxes = true,
+                FullRowSelect = true,
+                BackColor = BgCard,
+                ForeColor = TextPrimary,
+                BorderStyle = BorderStyle.None
+            };
+            lvDiscoveredAI.Columns.Add("Под защитой", 95);
+            lvDiscoveredAI.Columns.Add("AI Приложение / Вкладка", 230);
+            lvDiscoveredAI.Columns.Add("Тип", 130);
+            lvDiscoveredAI.Columns.Add("Статус", 100);
+            lvDiscoveredAI.Columns.Add("Путь", 210);
+
+            lvDiscoveredAI.ItemChecked += (s, e) =>
+            {
+                if (e.Item.Tag is DiscoveredAIApp)
+                {
+                    ((DiscoveredAIApp)e.Item.Tag).SelectedForKillSwitch = e.Item.Checked;
+                }
             };
 
-            chkFirewallGuard = new CheckBox
-            {
-                Text = "Авто-изоляция: Активировать сетевую блокировку при обнаружении ошибки датчика",
-                Location = new Point(25, 220),
-                AutoSize = true,
-                Checked = false
-            };
-
-            Label lblLogTitle = new Label { Text = "Журнал защиты нейросетей:", Location = new Point(20, 260), AutoSize = true };
             rtbKillSwitchLog = new RichTextBox
             {
-                Location = new Point(20, 285),
-                Size = new Size(740, 240),
-                BackColor = Color.FromArgb(15, 15, 18),
-                ForeColor = Color.FromArgb(52, 211, 153),
+                Location = new Point(0, 474),
+                Size = new Size(780, 180),
+                Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
+                BackColor = Color.FromArgb(14, 14, 18),
+                ForeColor = AccentEmerald,
+                BorderStyle = BorderStyle.None,
                 Font = new Font("Consolas", 9f),
                 ReadOnly = true
             };
 
-            pnl.Controls.AddRange(new Control[]
-            {
-                lblKillSwitchStatus, lblDesc, btnEmergencyPanic, btnUnlock,
-                chkAutoKill, chkFirewallGuard, lblLogTitle, rtbKillSwitchLog
-            });
-
-            tabKillSwitch.Controls.Add(pnl);
+            page.Controls.AddRange(new Control[] { cardTop, lvDiscoveredAI, rtbKillSwitchLog });
         }
 
-        private void BuildAuditTab()
+        private void BuildAuditPage(Panel page)
         {
-            Panel pnl = new Panel { Dock = DockStyle.Fill, Padding = new Padding(25) };
+            var card = CreateCard(0, 0, 780, 340, AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right);
+            Label lblTitle = new Label { Text = "Аудит маскировки: GPS vs Системный TZ vs Публичный IP", Font = new Font("Segoe UI", 12f, FontStyle.Bold), Location = new Point(20, 20), AutoSize = true };
 
-            Label lblTitle = new Label
-            {
-                Text = "Диагностика полной маскировки: GPS vs Внешний IP vs Часовой пояс",
-                Font = new Font("Segoe UI", 12f, FontStyle.Bold),
-                Location = new Point(20, 20),
-                AutoSize = true
-            };
+            lblAuditGps = new Label { Location = new Point(20, 70), AutoSize = true, Text = "1. Сенсор FakeGPS Windows: ..." };
+            lblAuditHostTz = new Label { Location = new Point(20, 105), AutoSize = true, Text = "2. Системный Timezone Windows: ..." };
+            lblAuditIp = new Label { Location = new Point(20, 140), AutoSize = true, Text = "3. Публичный IP-адрес: ..." };
+            lblAuditCountry = new Label { Location = new Point(20, 175), AutoSize = true, Text = "4. Страна по IP: ..." };
+            lblAuditVerdict = new Label { Location = new Point(20, 220), AutoSize = true, Font = new Font("Segoe UI", 10.5f, FontStyle.Bold), Text = "Нажмите кнопку для запуска проверки" };
 
-            lblAuditGps = new Label { Location = new Point(25, 70), AutoSize = true, Text = "1. GPS Сенсор Windows: Опрос..." };
-            lblAuditIp = new Label { Location = new Point(25, 110), AutoSize = true, Text = "2. Публичный IP-адрес: Опрос..." };
-            lblAuditCountry = new Label { Location = new Point(25, 150), AutoSize = true, Text = "3. Страна по IP: Опрос..." };
-            lblAuditVerdict = new Label
-            {
-                Location = new Point(25, 200),
-                AutoSize = true,
-                Font = new Font("Segoe UI", 10.5f, FontStyle.Bold),
-                Text = "Вердикт безопасности: Нажмите кнопку для проверки"
-            };
-
-            btnRunAudit = new Button
-            {
-                Text = "🔎 Запустить аудит маскировки",
-                Location = new Point(25, 260),
-                Size = new Size(260, 42),
-                BackColor = Color.FromArgb(59, 130, 246),
-                ForeColor = Color.White,
-                FlatStyle = FlatStyle.Flat
-            };
+            btnRunAudit = CreateStyledButton("🔎 Запустить полный аудит", 20, 275, 240, 42, AccentIndigo);
             btnRunAudit.Click += (s, e) => RunSecurityAudit();
 
-            pnl.Controls.AddRange(new Control[]
-            {
-                lblTitle, lblAuditGps, lblAuditIp, lblAuditCountry, lblAuditVerdict, btnRunAudit
-            });
-
-            tabAudit.Controls.Add(pnl);
+            card.Controls.AddRange(new Control[] { lblTitle, lblAuditGps, lblAuditHostTz, lblAuditIp, lblAuditCountry, lblAuditVerdict, btnRunAudit });
+            page.Controls.Add(card);
         }
 
         private void RefreshDashboard()
         {
             bool active = FakeGPSCore.IsDriverActive();
-            lblDriverStatus.Text = active ? "🟢 Драйвер FakeGPS: АКТИВЕН (OK)" : "🔴 Драйвер FakeGPS: НЕ АКТИВЕН / ОШИБКА";
-            lblDriverStatus.ForeColor = active ? Color.FromArgb(16, 185, 129) : Color.FromArgb(239, 68, 68);
+            lblDriverBadge.Text = active ? "● Драйвер FakeGPS: АКТИВЕН (OK)" : "● Драйвер FakeGPS: ОТКЛЮЧЕН / ОШИБКА";
+            lblDriverBadge.ForeColor = active ? AccentEmerald : AccentRed;
+            lblHostTzBadge.Text = "Системный TZ Windows: " + TimeZoneInfo.Local.Id + " (не затрагивается при изолированном запуске)";
 
             var cfg = FakeGPSCore.GetConfiguredCoordinates();
             if (cfg != null)
             {
-                lblCurrentConfig.Text = string.Format("Конфигурация в реестре: Широта {0}, Долгота {1}",
-                    cfg.Latitude.ToString("F6", CultureInfo.InvariantCulture),
-                    cfg.Longitude.ToString("F6", CultureInfo.InvariantCulture));
-            }
-            else
-            {
-                lblCurrentConfig.Text = "Конфигурация в реестре: Не задана";
+                txtLat.Text = cfg.Latitude.ToString("F6", CultureInfo.InvariantCulture);
+                txtLon.Text = cfg.Longitude.ToString("F6", CultureInfo.InvariantCulture);
             }
 
             ThreadPool.QueueUserWorkItem(state =>
@@ -1038,7 +1356,7 @@ namespace FakeGPS.UI
                     var loc = FakeGPSCore.QueryWindowsLocationApi();
                     this.Invoke((MethodInvoker)delegate
                     {
-                        lblApiLocation.Text = string.Format("Ответ Windows Location API: Широта {0}, Долгота {1}",
+                        lblApiCoords.Text = string.Format("Windows API: {0}, {1}",
                             loc.Latitude.ToString("F6", CultureInfo.InvariantCulture),
                             loc.Longitude.ToString("F6", CultureInfo.InvariantCulture));
                     });
@@ -1050,8 +1368,7 @@ namespace FakeGPS.UI
         private void RefreshAppList()
         {
             lvApps.Items.Clear();
-            var apps = PerAppLocationManager.GetApps();
-            foreach (var a in apps)
+            foreach (var a in PerAppLocationManager.GetApps())
             {
                 var lvi = new ListViewItem(a.IsAllowed ? "✅ Разрешено" : "❌ Запрещено");
                 lvi.Checked = a.IsAllowed;
@@ -1062,27 +1379,29 @@ namespace FakeGPS.UI
             }
         }
 
-        private void ToggleAllApps(bool allow)
+        private void RunAIDiscovery()
         {
-            foreach (ListViewItem item in lvApps.Items)
+            lvDiscoveredAI.Items.Clear();
+            discoveredApps = AIDiscoveryEngine.DiscoverAll();
+            foreach (var app in discoveredApps)
             {
-                item.Checked = allow;
+                var lvi = new ListViewItem(app.SelectedForKillSwitch ? "Вкл" : "Выкл");
+                lvi.Checked = app.SelectedForKillSwitch;
+                lvi.SubItems.Add(app.Name);
+                lvi.SubItems.Add(app.Category);
+                lvi.SubItems.Add(app.IsRunning ? "🟢 Работает" : "⚪ Установлено");
+                lvi.SubItems.Add(app.ExecutablePath);
+                lvi.Tag = app;
+                lvDiscoveredAI.Items.Add(lvi);
             }
+            LogKillSwitch(string.Format("Автообнаружение: найдено {0} AI-приложений/процессов.", discoveredApps.Count));
         }
 
         private void UpdateKillSwitchUI()
         {
             bool blocked = AIKillSwitch.IsFirewallBlockActive();
-            if (blocked)
-            {
-                lblKillSwitchStatus.Text = "Статус AI Guard: 🔴 СЕТЬ ЗАБЛОКИРОВАНА (FIREWALL KILL SWITCH)";
-                lblKillSwitchStatus.ForeColor = Color.FromArgb(239, 68, 68);
-            }
-            else
-            {
-                lblKillSwitchStatus.Text = "Статус AI Guard: 🟢 АКТИВЕН (Мониторинг защиты)";
-                lblKillSwitchStatus.ForeColor = Color.FromArgb(16, 185, 129);
-            }
+            lblKillSwitchBadge.Text = blocked ? "● AI Guard: СЕТЬ ЗАБЛОКИРОВАНА (FIREWALL)" : "● AI Guard: АКТИВЕН (Мониторинг)";
+            lblKillSwitchBadge.ForeColor = blocked ? AccentRed : AccentEmerald;
         }
 
         private void GuardTimer_Tick(object sender, EventArgs e)
@@ -1090,22 +1409,14 @@ namespace FakeGPS.UI
             bool active = FakeGPSCore.IsDriverActive();
             if (!active)
             {
-                lblDriverStatus.Text = "🔴 Драйвер FakeGPS: НЕ АКТИВЕН / ОШИБКА";
-                lblDriverStatus.ForeColor = Color.FromArgb(239, 68, 68);
-
                 if (chkAutoKill.Checked)
                 {
-                    int killed = AIKillSwitch.TerminateAllAIProcesses();
-                    if (killed > 0)
-                    {
-                        LogKillSwitch(string.Format("⚠️ ОБНАРУЖЕН СБОЙ FAKEGPS! Автоматически закрыто {0} процессов нейросетей во избежание детекта.", killed));
-                    }
+                    int killed = AIKillSwitch.TerminateDiscoveredAI(discoveredApps);
+                    if (killed > 0) LogKillSwitch(string.Format("⚠️ Сбой драйвера! Закрыто AI-процессов: {0}", killed));
                 }
-
                 if (chkFirewallGuard.Checked && !AIKillSwitch.IsFirewallBlockActive())
                 {
-                    AIKillSwitch.SetFirewallBlock(true);
-                    LogKillSwitch("⚠️ Включена аварийная сетевая блокировка Firewall!");
+                    AIKillSwitch.SetFirewallBlock(true, discoveredApps);
                     UpdateKillSwitchUI();
                 }
             }
@@ -1114,7 +1425,7 @@ namespace FakeGPS.UI
         private void RunSecurityAudit()
         {
             btnRunAudit.Enabled = false;
-            lblAuditVerdict.Text = "Идет проверка...";
+            lblAuditVerdict.Text = "Проверка...";
 
             ThreadPool.QueueUserWorkItem(state =>
             {
@@ -1138,55 +1449,39 @@ namespace FakeGPS.UI
 
                 this.Invoke((MethodInvoker)delegate
                 {
-                    lblAuditGps.Text = string.Format("1. GPS Сенсор Windows: Широта {0}, Долгота {1}",
+                    lblAuditGps.Text = string.Format("1. Сенсор FakeGPS Windows: {0}, {1}",
                         loc.Latitude.ToString("F4", CultureInfo.InvariantCulture),
                         loc.Longitude.ToString("F4", CultureInfo.InvariantCulture));
+                    lblAuditHostTz.Text = "2. Системный Timezone Windows: " + TimeZoneInfo.Local.Id;
+                    lblAuditIp.Text = "3. Публичный IP-адрес: " + publicIp;
+                    lblAuditCountry.Text = "4. Страна по IP: " + country;
 
-                    lblAuditIp.Text = "2. Публичный IP-адрес: " + publicIp;
-                    lblAuditCountry.Text = "3. Страна по IP: " + country;
+                    bool gpsIsNl = (loc.Latitude >= 50.7 && loc.Latitude <= 53.6 && loc.Longitude >= 3.3 && loc.Longitude <= 7.3);
+                    bool ipIsNl = country.IndexOf("Netherlands", StringComparison.OrdinalIgnoreCase) >= 0;
 
-                    bool gpsIsNetherlands = (loc.Latitude >= 50.7 && loc.Latitude <= 53.6 && loc.Longitude >= 3.3 && loc.Longitude <= 7.3);
-                    bool ipIsNetherlands = country.IndexOf("Netherlands", StringComparison.OrdinalIgnoreCase) >= 0;
-
-                    if (gpsIsNetherlands && ipIsNetherlands)
+                    if (gpsIsNl && ipIsNl)
                     {
-                        lblAuditVerdict.Text = "✅ ВЕРДИКТ: ИДЕАЛЬНАЯ МАСКИРОВКА! И GPS, и IP указывают на Нидерланды. Нейросети не обнаружат подмену.";
-                        lblAuditVerdict.ForeColor = Color.FromArgb(16, 185, 129);
+                        lblAuditVerdict.Text = "✅ ИДЕАЛЬНО: И GPS, и IP указывают на Нидерланды. Используйте Изолированный лаунчер для TZ!";
+                        lblAuditVerdict.ForeColor = AccentEmerald;
                     }
-                    else if (gpsIsNetherlands && !ipIsNetherlands)
+                    else if (gpsIsNl)
                     {
-                        lblAuditVerdict.Text = string.Format("⚠️ ВНИМАНИЕ: РАСХОЖДЕНИЕ ДАННЫХ! GPS указывает на Нидерланды, но ваш IP из '{0}'.\n" +
-                            "Claude и ChatGPT могут обнаружить подмену по IP-адресу! Включите нидерландский VPN.", country);
+                        lblAuditVerdict.Text = string.Format("⚠️ РАСХОЖДЕНИЕ: GPS в Нидерландах, но IP из '{0}'. Включите NL VPN или Proxy!", country);
                         lblAuditVerdict.ForeColor = Color.FromArgb(245, 158, 11);
                     }
                     else
                     {
-                        lblAuditVerdict.Text = "❌ ВЕРДИКТ: Локация не замаскирована под Нидерланды.";
-                        lblAuditVerdict.ForeColor = Color.FromArgb(239, 68, 68);
+                        lblAuditVerdict.Text = "❌ GPS не установлен на Нидерланды.";
+                        lblAuditVerdict.ForeColor = AccentRed;
                     }
-
                     btnRunAudit.Enabled = true;
                 });
             });
         }
 
-        private void Log(string msg)
-        {
-            rtbLog.AppendText(string.Format("[{0}] {1}\n", DateTime.Now.ToString("HH:mm:ss"), msg));
-            rtbLog.ScrollToCaret();
-        }
-
-        private void LogLauncher(string msg)
-        {
-            rtbLauncherLog.AppendText(string.Format("[{0}] {1}\n", DateTime.Now.ToString("HH:mm:ss"), msg));
-            rtbLauncherLog.ScrollToCaret();
-        }
-
-        private void LogKillSwitch(string msg)
-        {
-            rtbKillSwitchLog.AppendText(string.Format("[{0}] {1}\n", DateTime.Now.ToString("HH:mm:ss"), msg));
-            rtbKillSwitchLog.ScrollToCaret();
-        }
+        private void Log(string msg) { rtbLog.AppendText(string.Format("[{0}] {1}\n", DateTime.Now.ToString("HH:mm:ss"), msg)); rtbLog.ScrollToCaret(); }
+        private void LogLauncher(string msg) { rtbLauncherLog.AppendText(string.Format("[{0}] {1}\n", DateTime.Now.ToString("HH:mm:ss"), msg)); rtbLauncherLog.ScrollToCaret(); }
+        private void LogKillSwitch(string msg) { rtbKillSwitchLog.AppendText(string.Format("[{0}] {1}\n", DateTime.Now.ToString("HH:mm:ss"), msg)); rtbKillSwitchLog.ScrollToCaret(); }
 
         [STAThread]
         public static void Main()
