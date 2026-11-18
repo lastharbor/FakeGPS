@@ -1,64 +1,76 @@
-# FakeGPS
+# FakeGPS (Windows 11 Edition)
 
-**Note: this driver is NOT maintained by the author at this time**
+Виртуальный сенсор-драйвер геолокации для Windows 10/11 с графическим интерфейсом управления, поддержкой настройки спуфинга для отдельных приложений и защитным **Kill Switch для Claude, ChatGPT и других нейросетей**.
 
-FakeGPS is a Windows driver which allows the user to provide geolocation information without a physical GPS device.
+Форк оригинального проекта Julian Kay с полной адаптацией под современные версии Windows 11 (23H2 / 24H2+).
 
-**Note: in order to use FakeGPS please download [the released binary](https://github.com/juliankay/FakeGPS/releases), not the source code.**
+---
 
-## Why?
-Windows 10 includes Cortana, a digital assistant which can help you with location based reminders.
-When there is no GPS device the location services in Windows will try to guess where you are geographically using other means like Wi-Fi or IP address.
-These methods don't always work, rendering the location-based features of Cortana as useless.
+## ✨ Что нового и исправлено для Windows 11
 
-This is especially noticeable on virtual machines which provide geolocation of the cloud infrastructure, not where the user is.
+1. **Решена проблема истекших сертификатов драйвера:**
+   - Оригинальный тестовый сертификат WDK от 2015 года истек в декабре 2025 г., блокируя установку пакета (`0x800b0101`). Драйвер переподписан актуальным локальным доверенным сертификатом.
+2. **Поддержка класса `Sensor` в Windows 11:**
+   - Узел устройства теперь регистрируется в актуальной ветке `ROOT\SENSOR\0000` вместо устаревшей `ROOT\UNKNOWN\0000`.
+3. **Исправлена ошибка разделителя локали в CLI:**
+   - Оригинальная утилита падала с `FormatException` на системах с не-английской локалью (`ru-RU`, где десятичный разделитель — запятая). Новая версия парсит координаты независимо от системной локали (`CultureInfo.InvariantCulture`).
+4. **Автоматический перезапуск сенсора:**
+   - При смене координат драйвер перезапускает стек PnP автоматически, не требуя ручных манипуляций в Диспетчере устройств.
+5. **Графический интерфейс (GUI):**
+   - Удобная панель управления в темной теме со встроенными пресетами (Нидерланды: Амстердам, Роттердам, Гаага, Утрехт, Эйндховен; а также Лондон, Франкфурт, Нью-Йорк, Токио).
+6. **Спуфинг для отдельных приложений (Per-App Location):**
+   - Управление доступом к службам Windows Location API на уровне конкретных `.exe` файлов (через Windows ConsentStore). Можно разрешить спуфленные координаты только нужным браузерам/программам, запретив доступ остальным.
+7. **AI Kill Switch (Claude & ChatGPT Guard):**
+   - Аварийная кнопка мгновенного завершения всех процессов нейросетей и включения изоляции через Брандмауэр Windows (Firewall Block).
+   - Автоматический мониторинг здоровья драйвера: в случае сбоя сенсора AI-приложения закрываются или изолируются, предотвращая утечку реального местоположения и бан аккаунтов.
+8. **Аудит маскировки (Leak Audit):**
+   - Встроенный тест расхождения данных: сопоставление системных GPS-координат, публичного IP-адреса и страны интернет-провайдера.
 
-For more information on why you might want this see [Using Cortana with a Fake GPS Driver on Windows 10](http://juliankay.com/development/using-cortana-with-a-fake-gps-driver-on-windows-10/).
+---
 
-## Requirements
+## 🚀 Быстрый старт
 
-1. Windows 10 x64
-2. Test Mode Enabled (`bcdedit /set testsigning on`)
-
-Note that Test Mode may be incompatible with BitLocker and Secure Boot.
-
-## Usage
-
-### Driver Installation
-
-* Ensure your system meets the requirements (**Test Mode must be enabled**)
-* [Download the latest version of the released binary](https://github.com/juliankay/FakeGPS/releases) as a zip and extract to a folder
-* Install the driver using "Add Legacy Hardware" in Device Manager
-* Confirm you want to install the unsigned driver
-    * The driver may say it failed to start on first use, see issue #3
-
-Note the settings are currently stored in `HKLM\System\CurrentControlSet\Enum\ROOT\UNKNOWN\0000\Device Parameters\FakeGPS` but this will change, see issue #2
-
-### Command Line Options
-
-Usage: FakeGPS -command
-
-```
-FakeGPS -g              get current status
-FakeGPS -s <lat,long>   set latitude and longitude
+### 1. Установка драйвера
+Запустите PowerShell от имени **Администратора** в папке `dist`:
+```powershell
+.\dist\Install.ps1
 ```
 
-Example:
-
-```
-PS> FakeGPS -s 51.51786,-0.102216
-The following location has been set in the driver's registry settings:
-Lat:    51.51786
-Long:   -0.102216
-
-PS> FakeGPS -g
-The following location has been got from the Windows location API:
-Lat:    51.51786
-Long:   -0.102216
+### 2. Запуск графического интерфейса
+Запустите `FakeGPS.UI.exe` из папки `dist/`:
+```powershell
+.\dist\FakeGPS.UI.exe
 ```
 
-Note: Once you have set the latitude and longitude you may need to restart the device driver for it take effect. This is due to the Geolocation driver caching the last result and may be fixed in future versions.
+### 3. Использование через командную строку (CLI)
+- **Установить координаты (Нидерланды / Амстердам):**
+  ```powershell
+  FakeGPS -s 52.379189,4.899431
+  ```
+- **Проверить текущие координаты в Windows:**
+  ```powershell
+  FakeGPS -g
+  ```
+- **Перезапустить драйвер вручную:**
+  ```powershell
+  FakeGPS -r
+  ```
 
-## Questions?
+---
 
-Please note that I no longer use this tool, and at the time of this update I have not touched the code in about three years, so while you're free to create issues - I'm not going to be fixing them. ✌️
+## 🎯 Насколько качественно спуфится геолокация?
+
+### 1. Что спуфится на 100%:
+- **Служба Windows Location API**: любые программы, обращающиеся к Windows за геопозицией (браузеры Chrome, Edge, Brave, десктопные UWP/Electron приложения, системные виджеты погоды, карты). Они видят точные координаты, заданные через FakeGPS (с погрешностью < 5 метров).
+
+### 2. Что НЕ спуфит только один GPS-драйвер:
+- **IP-геолокация (MaxMind / GeoIP)**: сервисы вроде `claude.ai` и `chatgpt.com` на бэкенде в первую очередь определяют страну по **IP-адресу входящего соединения**. Если ваш IP из России или Финляндии, а GPS из Амстердама — сервер зафиксирует несоответствие.
+- **Wi-Fi BSSID Geolocation**: при включенном Wi-Fi браузеры Google Chrome/Edge могут сканировать окружающие Wi-Fi роутеры (MAC-адреса BSSID) и запрашивать позицию у Google Location Services в обход системного GPS.
+- **WebRTC Leaks**: утечка реального IP через WebRTC STUN-запросы.
+
+### 🛡️ Чек-лист полной маскировки:
+1. Запустите **FakeGPS** и выставьте координаты Нидерландов.
+2. Включите **VPN / Прокси с нидерландским IP** (город Амстердам).
+3. Перейдите во вкладку **"🔍 Аудит утечек"** в `FakeGPS.UI.exe` и нажмите **"Запустить аудит маскировки"**.
+4. Убедитесь, что индикатор стал зеленым (`ИДЕАЛЬНАЯ МАСКИРОВКА`).
+5. Держите включенным **AI Kill Switch** на вкладке защиты.
