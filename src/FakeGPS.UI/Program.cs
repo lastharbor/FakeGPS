@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
-using System.Drawing.Drawing2D;
 using System.Globalization;
 using System.IO;
 using System.Net;
@@ -97,10 +96,7 @@ namespace FakeGPS.UI
                     return output.Contains("Started") || output.Contains("OK") || output.Contains("Запущено");
                 }
             }
-            catch
-            {
-                return false;
-            }
+            catch { return false; }
         }
 
         public static void SetCoordinates(double lat, double lon, out string instanceId)
@@ -109,14 +105,11 @@ namespace FakeGPS.UI
             using (var key = Registry.LocalMachine.OpenSubKey(path, true))
             {
                 if (key == null)
-                {
                     throw new InvalidOperationException("Ключ FakeGPS не найден в реестре. Убедитесь, что драйвер установлен.");
-                }
 
                 key.SetValue(LatitudeProperty, lat.ToString(CultureInfo.InvariantCulture));
                 key.SetValue(LongitudeProperty, lon.ToString(CultureInfo.InvariantCulture));
             }
-
             RestartDevice(instanceId);
         }
 
@@ -152,7 +145,6 @@ namespace FakeGPS.UI
                     Thread.Sleep(100);
                     if (!watcher.Position.Location.IsUnknown) break;
                 }
-
                 var loc = watcher.Position.Location;
                 return new LatLong(loc.Latitude, loc.Longitude);
             }
@@ -176,10 +168,7 @@ namespace FakeGPS.UI
                     return proc.ExitCode == 0;
                 }
             }
-            catch
-            {
-                return false;
-            }
+            catch { return false; }
         }
     }
 
@@ -208,12 +197,10 @@ namespace FakeGPS.UI
                     if (double.TryParse(m.Groups[1].Value, NumberStyles.Any, CultureInfo.InvariantCulture, out lat) &&
                         double.TryParse(m.Groups[2].Value, NumberStyles.Any, CultureInfo.InvariantCulture, out lon))
                     {
-                        string name = Regex.Unescape(m.Groups[3].Value);
-                        results.Add(new LatLong(lat, lon, name));
+                        results.Add(new LatLong(lat, lon, Regex.Unescape(m.Groups[3].Value)));
                     }
                 }
             }
-
             return results;
         }
     }
@@ -221,7 +208,7 @@ namespace FakeGPS.UI
     public class DiscoveredAIApp
     {
         public string Name { get; set; }
-        public string Category { get; set; } // Desktop, UWP, CLI, Browser Tab
+        public string Category { get; set; }
         public string ProcessName { get; set; }
         public string ExecutablePath { get; set; }
         public bool IsRunning { get; set; }
@@ -248,7 +235,6 @@ namespace FakeGPS.UI
             var found = new List<DiscoveredAIApp>();
             var seenPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            // 1. Scan running processes
             try
             {
                 foreach (var p in Process.GetProcesses())
@@ -264,11 +250,7 @@ namespace FakeGPS.UI
                         bool isKnownProcess = false;
                         foreach (var kw in KnownAIKeywords)
                         {
-                            if (pname.Contains(kw.Replace(" ", "")))
-                            {
-                                isKnownProcess = true;
-                                break;
-                            }
+                            if (pname.Contains(kw.Replace(" ", ""))) { isKnownProcess = true; break; }
                         }
 
                         bool isBrowserWithAI = false;
@@ -281,11 +263,7 @@ namespace FakeGPS.UI
                                     string lowerTitle = title.ToLowerInvariant();
                                     foreach (var kw in KnownAIKeywords)
                                     {
-                                        if (lowerTitle.Contains(kw) || lowerTitle.Contains("gemini"))
-                                        {
-                                            isBrowserWithAI = true;
-                                            break;
-                                        }
+                                        if (lowerTitle.Contains(kw) || lowerTitle.Contains("gemini")) { isBrowserWithAI = true; break; }
                                     }
                                     break;
                                 }
@@ -315,7 +293,6 @@ namespace FakeGPS.UI
             }
             catch { }
 
-            // 2. Scan installed paths in %LocalAppData%\Programs and %UserProfile%\.local\bin
             var scanDirs = new List<string>
             {
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs"),
@@ -357,7 +334,6 @@ namespace FakeGPS.UI
                 catch { }
             }
 
-            // 3. Scan WindowsApps for OpenAI.ChatGPT / OpenAI.Codex / Claude
             string winApps = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "WindowsApps");
             if (Directory.Exists(winApps))
             {
@@ -476,11 +452,19 @@ namespace FakeGPS.UI
         {
             if (string.IsNullOrEmpty(timeZoneId)) timeZoneId = "Europe/Amsterdam";
 
+            // Auto-use sing-box local mixed proxy if running and user didn't override
+            if (string.IsNullOrEmpty(proxyUrl) && SingBoxManager.IsRunning())
+            {
+                proxyUrl = "socks5://127.0.0.1:10808";
+            }
+
             var psi = new ProcessStartInfo();
             psi.FileName = exePath;
 
             var extraArgs = new List<string>();
             extraArgs.Add(string.Format("--timezone=\"{0}\"", timeZoneId));
+            extraArgs.Add("--lang=en-US");
+            extraArgs.Add("--disable-quic");
             extraArgs.Add("--force-webrtc-ip-handling-policy=disable_non_proxied_udp");
             extraArgs.Add("--enforce-webrtc-ip-permission-check");
             extraArgs.Add("--disable-features=GeolocationBssid");
@@ -488,6 +472,8 @@ namespace FakeGPS.UI
             if (!string.IsNullOrEmpty(proxyUrl))
             {
                 extraArgs.Add(string.Format("--proxy-server=\"{0}\"", proxyUrl.Trim()));
+                // Prevent local DNS leaks by forcing remote DNS resolution through SOCKS5
+                extraArgs.Add("--host-resolver-rules=\"MAP * ~NOTFOUND , EXCLUDE 127.0.0.1\"");
             }
 
             string combinedArgs = string.Join(" ", extraArgs.ToArray());
@@ -499,7 +485,17 @@ namespace FakeGPS.UI
             psi.Arguments = combinedArgs;
             psi.UseShellExecute = false;
             psi.EnvironmentVariables["TZ"] = timeZoneId;
+            psi.EnvironmentVariables["LANG"] = "en_US.UTF-8";
             psi.EnvironmentVariables["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = combinedArgs;
+
+            if (!string.IsNullOrEmpty(proxyUrl))
+            {
+                string envProxy = proxyUrl.Replace("socks5://", "socks5h://");
+                psi.EnvironmentVariables["HTTP_PROXY"] = envProxy;
+                psi.EnvironmentVariables["HTTPS_PROXY"] = envProxy;
+                psi.EnvironmentVariables["ALL_PROXY"] = envProxy;
+                psi.EnvironmentVariables["NODE_USE_ENV_PROXY"] = "1";
+            }
 
             try { PerAppLocationManager.AddAppByPath(exePath, true); } catch { }
             return Process.Start(psi);
@@ -532,9 +528,7 @@ namespace FakeGPS.UI
             foreach (var t in targets)
             {
                 if (t.SelectedForKillSwitch && !string.IsNullOrEmpty(t.ProcessName))
-                {
                     procNames.Add(t.ProcessName);
-                }
             }
 
             foreach (var name in procNames)
@@ -584,9 +578,7 @@ namespace FakeGPS.UI
                     foreach (var t in targets)
                     {
                         if (t.SelectedForKillSwitch && !string.IsNullOrEmpty(t.ExecutablePath) && File.Exists(t.ExecutablePath))
-                        {
                             blockedExes.Add(t.ExecutablePath);
-                        }
                     }
 
                     foreach (var exe in blockedExes)
@@ -626,7 +618,6 @@ namespace FakeGPS.UI
 
     public class MainForm : Form
     {
-        // Theme Palette
         private readonly Color BgMain = Color.FromArgb(17, 17, 21);
         private readonly Color BgSidebar = Color.FromArgb(24, 24, 31);
         private readonly Color BgCard = Color.FromArgb(30, 30, 38);
@@ -642,7 +633,7 @@ namespace FakeGPS.UI
         private List<Button> navButtons = new List<Button>();
         private List<Panel> pages = new List<Panel>();
 
-        // Page 0: Map & GPS Controller
+        // Page 0: Map & GPS
         private Label lblDriverBadge;
         private Label lblHostTzBadge;
         private Label lblApiCoords;
@@ -656,13 +647,21 @@ namespace FakeGPS.UI
         // Page 1: Per-App Location
         private ListView lvApps;
 
-        // Page 2: Isolated Launcher
+        // Page 2: VPN Cores (sing-box & Amnezia)
+        private TextBox txtVlessSub;
+        private ComboBox cbVlessNodes;
+        private CheckBox chkPerAppTun;
+        private Label lblSingBoxStatus;
+        private TextBox txtAmneziaInput;
+        private RichTextBox rtbCoreLog;
+
+        // Page 3: Isolated Launcher
         private ComboBox cbLauncherTz;
         private TextBox txtLauncherProxy;
         private TextBox txtCustomExe;
         private RichTextBox rtbLauncherLog;
 
-        // Page 3: AI Discovery & Kill Switch
+        // Page 4: AI Discovery & Kill Switch
         private ListView lvDiscoveredAI;
         private Label lblKillSwitchBadge;
         private CheckBox chkAutoKill;
@@ -670,12 +669,8 @@ namespace FakeGPS.UI
         private RichTextBox rtbKillSwitchLog;
         private List<DiscoveredAIApp> discoveredApps = new List<DiscoveredAIApp>();
 
-        // Page 4: Security Audit
-        private Label lblAuditGps;
-        private Label lblAuditHostTz;
-        private Label lblAuditIp;
-        private Label lblAuditCountry;
-        private Label lblAuditVerdict;
+        // Page 5: Deep Leak Audit
+        private RichTextBox rtbAuditReport;
         private Button btnRunAudit;
 
         private System.Windows.Forms.Timer guardTimer;
@@ -688,6 +683,7 @@ namespace FakeGPS.UI
             RefreshAppList();
             RunAIDiscovery();
             UpdateKillSwitchUI();
+            UpdateCoreStatusUI();
         }
 
         private void EnableIE11WebBrowserEmulation()
@@ -705,16 +701,15 @@ namespace FakeGPS.UI
 
         private void InitializeUI()
         {
-            this.Text = "FakeGPS Studio — Windows 11 Spoofer & AI Shield";
-            this.Size = new Size(1060, 740);
-            this.MinimumSize = new Size(940, 640);
+            this.Text = "FakeGPS Studio — Windows 11 Spoofer, sing-box/Amnezia & AI Shield";
+            this.Size = new Size(1080, 760);
+            this.MinimumSize = new Size(960, 660);
             this.StartPosition = FormStartPosition.CenterScreen;
             this.BackColor = BgMain;
             this.ForeColor = TextPrimary;
             this.Font = new Font("Segoe UI", 9.5f);
 
-            // Sidebar
-            pnlSidebar = new Panel { Dock = DockStyle.Left, Width = 235, BackColor = BgSidebar };
+            pnlSidebar = new Panel { Dock = DockStyle.Left, Width = 240, BackColor = BgSidebar };
             pnlSidebar.Paint += (s, e) =>
             {
                 using (var pen = new Pen(BorderCard, 1))
@@ -731,7 +726,7 @@ namespace FakeGPS.UI
             };
             Label lblSubBrand = new Label
             {
-                Text = "Win11 • Per-App • Zero-Leak",
+                Text = "sing-box • Amnezia • Zero-Leak",
                 Font = new Font("Segoe UI", 8.5f),
                 ForeColor = AccentEmerald,
                 Location = new Point(21, 46),
@@ -745,28 +740,26 @@ namespace FakeGPS.UI
             this.Controls.Add(pnlContent);
             this.Controls.Add(pnlSidebar);
 
-            // Create Pages
-            var p0 = CreatePage();
-            var p1 = CreatePage();
-            var p2 = CreatePage();
-            var p3 = CreatePage();
-            var p4 = CreatePage();
+            for (int i = 0; i < 6; i++)
+            {
+                var p = CreatePage();
+                pages.Add(p);
+                pnlContent.Controls.Add(p);
+            }
 
-            pages.AddRange(new Panel[] { p0, p1, p2, p3, p4 });
-            foreach (var p in pages) pnlContent.Controls.Add(p);
+            BuildMapControllerPage(pages[0]);
+            BuildPerAppPage(pages[1]);
+            BuildVpnCoresPage(pages[2]);
+            BuildLauncherPage(pages[3]);
+            BuildAIDiscoveryKillSwitchPage(pages[4]);
+            BuildAuditPage(pages[5]);
 
-            BuildMapControllerPage(p0);
-            BuildPerAppPage(p1);
-            BuildLauncherPage(p2);
-            BuildAIDiscoveryKillSwitchPage(p3);
-            BuildAuditPage(p4);
-
-            // Sidebar Nav Buttons
             AddNavButton("🗺️  Карта и GPS", 0, 90);
-            AddNavButton("🎯  Доступ приложений", 1, 140);
-            AddNavButton("🚀  Изоляция (Timezone)", 2, 190);
-            AddNavButton("🛡️  AI Kill Switch", 3, 240);
-            AddNavButton("🔍  Аудит утечек", 4, 290);
+            AddNavButton("🎯  Доступ приложений", 1, 138);
+            AddNavButton("🌐  VPN Ядра (VLESS/AWG)", 2, 186);
+            AddNavButton("🚀  Изоляция (Timezone)", 3, 234);
+            AddNavButton("🛡️  AI Kill Switch", 4, 282);
+            AddNavButton("🔍  Аудит утечек", 5, 330);
 
             SelectPage(0);
 
@@ -775,10 +768,7 @@ namespace FakeGPS.UI
             guardTimer.Start();
         }
 
-        private Panel CreatePage()
-        {
-            return new Panel { Dock = DockStyle.Fill, BackColor = BgMain, Visible = false };
-        }
+        private Panel CreatePage() { return new Panel { Dock = DockStyle.Fill, BackColor = BgMain, Visible = false }; }
 
         private void AddNavButton(string text, int pageIndex, int top)
         {
@@ -786,10 +776,10 @@ namespace FakeGPS.UI
             {
                 Text = "  " + text,
                 Location = new Point(12, top),
-                Size = new Size(210, 42),
+                Size = new Size(216, 40),
                 FlatStyle = FlatStyle.Flat,
                 TextAlign = ContentAlignment.MiddleLeft,
-                Font = new Font("Segoe UI", 10f, FontStyle.Regular),
+                Font = new Font("Segoe UI", 9.8f, FontStyle.Regular),
                 ForeColor = TextMuted,
                 BackColor = BgSidebar,
                 Cursor = Cursors.Hand,
@@ -811,26 +801,20 @@ namespace FakeGPS.UI
                 {
                     navButtons[i].BackColor = Color.FromArgb(42, 42, 56);
                     navButtons[i].ForeColor = Color.White;
-                    navButtons[i].Font = new Font("Segoe UI", 10f, FontStyle.Bold);
+                    navButtons[i].Font = new Font("Segoe UI", 9.8f, FontStyle.Bold);
                 }
                 else
                 {
                     navButtons[i].BackColor = BgSidebar;
                     navButtons[i].ForeColor = TextMuted;
-                    navButtons[i].Font = new Font("Segoe UI", 10f, FontStyle.Regular);
+                    navButtons[i].Font = new Font("Segoe UI", 9.8f, FontStyle.Regular);
                 }
             }
         }
 
         private Panel CreateCard(int x, int y, int w, int h, AnchorStyles anchor = AnchorStyles.Top | AnchorStyles.Left)
         {
-            var card = new Panel
-            {
-                Location = new Point(x, y),
-                Size = new Size(w, h),
-                BackColor = BgCard,
-                Anchor = anchor
-            };
+            var card = new Panel { Location = new Point(x, y), Size = new Size(w, h), BackColor = BgCard, Anchor = anchor };
             card.Paint += (s, e) =>
             {
                 using (var pen = new Pen(BorderCard, 1))
@@ -858,27 +842,24 @@ namespace FakeGPS.UI
 
         private void BuildMapControllerPage(Panel page)
         {
-            // Status Header Card
-            var cardStatus = CreateCard(0, 0, 780, 75, AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right);
+            var cardStatus = CreateCard(0, 0, 795, 75, AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right);
             lblDriverBadge = new Label { Location = new Point(16, 12), AutoSize = true, Font = new Font("Segoe UI", 10.5f, FontStyle.Bold), Text = "● Проверка драйвера..." };
-            lblHostTzBadge = new Label { Location = new Point(16, 42), AutoSize = true, ForeColor = TextMuted, Text = "Системный часовой пояс Windows: ..." };
+            lblHostTzBadge = new Label { Location = new Point(16, 42), AutoSize = true, ForeColor = TextMuted, Text = "Системный TZ: ..." };
             lblApiCoords = new Label { Location = new Point(360, 14), AutoSize = true, ForeColor = AccentEmerald, Font = new Font("Consolas", 9.5f), Text = "Windows API: ..." };
 
-            var btnRefresh = CreateStyledButton("🔄 Обновить", 640, 18, 125, 36, Color.FromArgb(55, 55, 70));
+            var btnRefresh = CreateStyledButton("🔄 Обновить", 655, 18, 125, 36, Color.FromArgb(55, 55, 70));
             btnRefresh.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             btnRefresh.Click += (s, e) => RefreshDashboard();
 
             cardStatus.Controls.AddRange(new Control[] { lblDriverBadge, lblHostTzBadge, lblApiCoords, btnRefresh });
 
-            // Search & Presets Card
-            var cardControls = CreateCard(0, 88, 780, 105, AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right);
-
+            var cardControls = CreateCard(0, 88, 795, 105, AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right);
             Label lblSearch = new Label { Text = "Поиск города (OpenStreetMap):", Location = new Point(16, 14), AutoSize = true, ForeColor = TextMuted };
             txtSearchCity = new TextBox { Location = new Point(215, 11), Width = 240, BackColor = BgMain, ForeColor = Color.White, BorderStyle = BorderStyle.FixedSingle };
             var btnSearch = CreateStyledButton("Найти", 465, 10, 80, 26, AccentIndigo);
             btnSearch.Click += (s, e) => SearchCityOnMap();
 
-            cbPresets = new ComboBox { Location = new Point(560, 11), Width = 205, DropDownStyle = ComboBoxStyle.DropDownList, BackColor = BgMain, ForeColor = Color.White };
+            cbPresets = new ComboBox { Location = new Point(560, 11), Width = 220, DropDownStyle = ComboBoxStyle.DropDownList, BackColor = BgMain, ForeColor = Color.White };
             cbPresets.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             var presets = new LatLong[]
             {
@@ -910,20 +891,14 @@ namespace FakeGPS.UI
             Label lblLon = new Label { Text = "Долгота:", Location = new Point(225, 56), AutoSize = true, ForeColor = TextMuted };
             txtLon = new TextBox { Location = new Point(290, 53), Width = 135, Text = "4.899431", BackColor = BgMain, ForeColor = Color.White, BorderStyle = BorderStyle.FixedSingle, Font = new Font("Consolas", 10f) };
 
-            var btnApply = CreateStyledButton("🚀 Применить координаты GPS", 445, 48, 320, 36, AccentEmerald);
+            var btnApply = CreateStyledButton("🚀 Применить координаты GPS", 445, 48, 335, 36, AccentEmerald);
             btnApply.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             btnApply.Click += (s, e) => ApplyCoordinatesFromUI();
 
             cardControls.Controls.AddRange(new Control[] { lblSearch, txtSearchCity, btnSearch, cbPresets, lblLat, txtLat, lblLon, txtLon, btnApply });
 
-            // Interactive Leaflet Map Card
-            var cardMap = CreateCard(0, 205, 780, 345, AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right);
-            wbMap = new WebBrowser
-            {
-                Dock = DockStyle.Fill,
-                ScriptErrorsSuppressed = true,
-                IsWebBrowserContextMenuEnabled = false
-            };
+            var cardMap = CreateCard(0, 205, 795, 365, AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right);
+            wbMap = new WebBrowser { Dock = DockStyle.Fill, ScriptErrorsSuppressed = true, IsWebBrowserContextMenuEnabled = false };
             wbMap.ObjectForScripting = new MapScriptBridge((lat, lon) =>
             {
                 this.Invoke((MethodInvoker)delegate
@@ -936,11 +911,10 @@ namespace FakeGPS.UI
             LoadLeafletMap(52.379189, 4.899431);
             cardMap.Controls.Add(wbMap);
 
-            // Log Box
             rtbLog = new RichTextBox
             {
-                Location = new Point(0, 560),
-                Size = new Size(780, 95),
+                Location = new Point(0, 580),
+                Size = new Size(795, 95),
                 Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
                 BackColor = Color.FromArgb(14, 14, 18),
                 ForeColor = TextMuted,
@@ -963,34 +937,22 @@ namespace FakeGPS.UI
 <script src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'></script>
 <style>
   html, body, #map {{ height: 100%; margin: 0; padding: 0; background: #141418; }}
-  .leaflet-tile-pane {{ filter: brightness(0.92) contrast(1.05); }}
 </style>
 </head>
 <body>
 <div id='map'></div>
 <script>
   var map = L.map('map').setView([{0}, {1}], 12);
-  L.tileLayer('https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
-      maxZoom: 19,
-      attribution: '&copy; OpenStreetMap'
-  }}).addTo(map);
-
+  L.tileLayer('https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{ maxZoom: 19, attribution: '&copy; OpenStreetMap' }}).addTo(map);
   var marker = L.marker([{0}, {1}], {{ draggable: true }}).addTo(map);
-
   map.on('click', function(e) {{
       marker.setLatLng(e.latlng);
-      if (window.external && window.external.OnMapClick) {{
-          window.external.OnMapClick(e.latlng.lat, e.latlng.lng);
-      }}
+      if (window.external && window.external.OnMapClick) window.external.OnMapClick(e.latlng.lat, e.latlng.lng);
   }});
-
   marker.on('dragend', function(e) {{
       var pos = marker.getLatLng();
-      if (window.external && window.external.OnMapClick) {{
-          window.external.OnMapClick(pos.lat, pos.lng);
-      }}
+      if (window.external && window.external.OnMapClick) window.external.OnMapClick(pos.lat, pos.lng);
   }});
-
   function setMarker(lat, lon) {{
       var ll = L.latLng(lat, lon);
       marker.setLatLng(ll);
@@ -999,27 +961,18 @@ namespace FakeGPS.UI
 </script>
 </body>
 </html>", initLat, initLon);
-
             wbMap.DocumentText = html;
         }
 
         private void MoveMapMarker(double lat, double lon)
         {
-            try
-            {
-                if (wbMap.Document != null)
-                {
-                    wbMap.Document.InvokeScript("setMarker", new object[] { lat, lon });
-                }
-            }
-            catch { }
+            try { if (wbMap.Document != null) wbMap.Document.InvokeScript("setMarker", new object[] { lat, lon }); } catch { }
         }
 
         private void SearchCityOnMap()
         {
             string query = txtSearchCity.Text.Trim();
             if (string.IsNullOrEmpty(query)) return;
-
             Log("Поиск через OpenStreetMap Nominatim: " + query + "...");
             ThreadPool.QueueUserWorkItem(state =>
             {
@@ -1036,16 +989,10 @@ namespace FakeGPS.UI
                             MoveMapMarker(first.Latitude, first.Longitude);
                             Log("Найдено: " + first.Name);
                         }
-                        else
-                        {
-                            Log("Локация не найдена по запросу: " + query);
-                        }
+                        else Log("Не найдено: " + query);
                     });
                 }
-                catch (Exception ex)
-                {
-                    this.Invoke((MethodInvoker)delegate { Log("Ошибка поиска OpenStreetMap: " + ex.Message); });
-                }
+                catch (Exception ex) { this.Invoke((MethodInvoker)delegate { Log("Ошибка Nominatim: " + ex.Message); }); }
             });
         }
 
@@ -1055,29 +1002,19 @@ namespace FakeGPS.UI
             {
                 double lat = double.Parse(txtLat.Text.Trim(), CultureInfo.InvariantCulture);
                 double lon = double.Parse(txtLon.Text.Trim(), CultureInfo.InvariantCulture);
-
                 string instanceId;
                 FakeGPSCore.SetCoordinates(lat, lon, out instanceId);
                 MoveMapMarker(lat, lon);
-                Log(string.Format("Координаты {0}, {1} применены на сенсор {2}!", lat, lon, instanceId));
+                Log(string.Format("Координаты {0}, {1} применены ({2})", lat, lon, instanceId));
                 RefreshDashboard();
             }
-            catch (Exception ex)
-            {
-                MessageBox.Show(this, "Ошибка: " + ex.Message, "FakeGPS", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
+            catch (Exception ex) { MessageBox.Show(this, "Ошибка: " + ex.Message, "FakeGPS", MessageBoxButtons.OK, MessageBoxIcon.Error); }
         }
 
         private void BuildPerAppPage(Panel page)
         {
-            var cardTop = CreateCard(0, 0, 780, 95, AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right);
-            Label lblInfo = new Label
-            {
-                Text = "Точечное разрешение Windows Location API (ConsentStore).\nПриложения с галочкой получают спуфленный GPS; без галочки — полностью заблокированы.",
-                Location = new Point(16, 12),
-                AutoSize = true,
-                ForeColor = TextMuted
-            };
+            var cardTop = CreateCard(0, 0, 795, 95, AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right);
+            Label lblInfo = new Label { Text = "Точечное разрешение Windows Location API (ConsentStore).\nПриложения с галочкой получают спуфленный GPS; без галочки — заблокированы.", Location = new Point(16, 12), AutoSize = true, ForeColor = TextMuted };
             var btnScan = CreateStyledButton("🔄 Сканировать", 16, 52, 130, 30, Color.FromArgb(55, 55, 70));
             btnScan.Click += (s, e) => RefreshAppList();
 
@@ -1086,36 +1023,19 @@ namespace FakeGPS.UI
             {
                 using (var ofd = new OpenFileDialog { Filter = "Programs (*.exe)|*.exe" })
                 {
-                    if (ofd.ShowDialog() == DialogResult.OK)
-                    {
-                        PerAppLocationManager.AddAppByPath(ofd.FileName, true);
-                        RefreshAppList();
-                    }
+                    if (ofd.ShowDialog() == DialogResult.OK) { PerAppLocationManager.AddAppByPath(ofd.FileName, true); RefreshAppList(); }
                 }
             };
 
-            var btnDenyAll = CreateStyledButton("Запретить всем", 620, 52, 140, 30, AccentRed);
+            var btnDenyAll = CreateStyledButton("Запретить всем", 635, 52, 140, 30, AccentRed);
             btnDenyAll.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             btnDenyAll.Click += (s, e) => { foreach (ListViewItem it in lvApps.Items) it.Checked = false; };
-
             cardTop.Controls.AddRange(new Control[] { lblInfo, btnScan, btnAdd, btnDenyAll });
 
-            lvApps = new ListView
-            {
-                Location = new Point(0, 108),
-                Size = new Size(780, 545),
-                Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
-                View = View.Details,
-                CheckBoxes = true,
-                FullRowSelect = true,
-                BackColor = BgCard,
-                ForeColor = TextPrimary,
-                BorderStyle = BorderStyle.None
-            };
+            lvApps = new ListView { Location = new Point(0, 108), Size = new Size(795, 565), Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right, View = View.Details, CheckBoxes = true, FullRowSelect = true, BackColor = BgCard, ForeColor = TextPrimary, BorderStyle = BorderStyle.None };
             lvApps.Columns.Add("Доступ GPS", 120);
             lvApps.Columns.Add("Приложение", 190);
-            lvApps.Columns.Add("Путь к файлу", 450);
-
+            lvApps.Columns.Add("Путь к файлу", 460);
             lvApps.ItemChecked += (s, e) =>
             {
                 if (e.Item.Tag is AppLocationItem)
@@ -1129,30 +1049,155 @@ namespace FakeGPS.UI
                     }
                 }
             };
-
             page.Controls.AddRange(new Control[] { cardTop, lvApps });
+        }
+
+        private void BuildVpnCoresPage(Panel page)
+        {
+            // Card 1: sing-box VLESS & Subscription
+            var cardSb = CreateCard(0, 0, 795, 225, AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right);
+            Label lblSbTitle = new Label { Text = "Ядро sing-box v1.14.4 — VLESS / Reality Подписки (Mixed 127.0.0.1:10808 + Per-App TUN)", Font = new Font("Segoe UI", 10.5f, FontStyle.Bold), Location = new Point(16, 12), AutoSize = true };
+            lblSingBoxStatus = new Label { Location = new Point(16, 38), AutoSize = true, Font = new Font("Segoe UI", 9.5f, FontStyle.Bold), Text = "● sing-box: Остановлен" };
+
+            Label lblSub = new Label { Text = "VLESS ссылка или URL подписки:", Location = new Point(16, 68), AutoSize = true, ForeColor = TextMuted };
+            txtVlessSub = new TextBox { Location = new Point(225, 65), Width = 415, BackColor = BgMain, ForeColor = Color.White, BorderStyle = BorderStyle.FixedSingle };
+            var btnParseSub = CreateStyledButton("📥 Загрузить", 650, 64, 128, 26, AccentIndigo);
+            btnParseSub.Click += (s, e) =>
+            {
+                try
+                {
+                    var nodes = SubscriptionParser.FetchAndParse(txtVlessSub.Text);
+                    cbVlessNodes.Items.Clear();
+                    foreach (var n in nodes) cbVlessNodes.Items.Add(n);
+                    if (cbVlessNodes.Items.Count > 0) cbVlessNodes.SelectedIndex = 0;
+                    LogCore(string.Format("Загружено VLESS-серверов: {0}", nodes.Count));
+                }
+                catch (Exception ex) { LogCore("Ошибка парсинга подписки: " + ex.Message); }
+            };
+
+            Label lblNode = new Label { Text = "Выбранный сервер:", Location = new Point(16, 105), AutoSize = true, ForeColor = TextMuted };
+            cbVlessNodes = new ComboBox { Location = new Point(225, 102), Width = 553, DropDownStyle = ComboBoxStyle.DropDownList, BackColor = BgMain, ForeColor = Color.White };
+
+            chkPerAppTun = new CheckBox
+            {
+                Text = "Включить Per-App TUN (wintun) для перехвата всего TCP/UDP/QUIC/DNS трафика выбранных AI-приложений",
+                Location = new Point(16, 140),
+                AutoSize = true,
+                Checked = false
+            };
+
+            var btnStartSb = CreateStyledButton("▶ Запустить sing-box", 16, 174, 210, 36, AccentEmerald);
+            btnStartSb.Click += (s, e) =>
+            {
+                var node = cbVlessNodes.SelectedItem as VlessNode;
+                if (node == null && txtVlessSub.Text.Trim().StartsWith("vless://"))
+                    node = SubscriptionParser.ParseVlessUri(txtVlessSub.Text.Trim());
+
+                if (node == null) { MessageBox.Show("Сначала загрузите VLESS-ссылку или подписку."); return; }
+
+                try
+                {
+                    var tunProcs = new List<string>();
+                    foreach (var a in discoveredApps)
+                    {
+                        if (a.SelectedForKillSwitch && !string.IsNullOrEmpty(a.ProcessName))
+                            tunProcs.Add(a.ProcessName);
+                    }
+                    if (!tunProcs.Contains("brave")) tunProcs.Add("brave");
+                    if (!tunProcs.Contains("chrome")) tunProcs.Add("chrome");
+
+                    SingBoxManager.Start(node, chkPerAppTun.Checked, tunProcs, line =>
+                    {
+                        this.BeginInvoke((MethodInvoker)delegate { LogCore("[sing-box] " + line); });
+                    });
+                    LogCore("sing-box запущен -> " + node.ToString());
+                    UpdateCoreStatusUI();
+                }
+                catch (Exception ex) { LogCore("Ошибка запуска sing-box: " + ex.Message); }
+            };
+
+            var btnStopSb = CreateStyledButton("⏹ Остановить sing-box", 238, 174, 190, 36, AccentRed);
+            btnStopSb.Click += (s, e) =>
+            {
+                SingBoxManager.Stop();
+                LogCore("sing-box остановлен.");
+                UpdateCoreStatusUI();
+            };
+
+            cardSb.Controls.AddRange(new Control[] { lblSbTitle, lblSingBoxStatus, lblSub, txtVlessSub, btnParseSub, lblNode, cbVlessNodes, chkPerAppTun, btnStartSb, btnStopSb });
+
+            // Card 2: AmneziaVPN / AmneziaWG
+            var cardAmz = CreateCard(0, 238, 795, 195, AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right);
+            Label lblAmzTitle = new Label { Text = "Ядро AmneziaVPN / AmneziaWG — Декодер vpn:// и .conf конфигов", Font = new Font("Segoe UI", 10.5f, FontStyle.Bold), Location = new Point(16, 12), AutoSize = true };
+            Label lblAmzHint = new Label { Text = "Вставьте ссылку vpn://... (из AmneziaVPN) или содержимое .conf файла AmneziaWG:", Location = new Point(16, 38), AutoSize = true, ForeColor = TextMuted };
+
+            txtAmneziaInput = new TextBox { Location = new Point(16, 62), Size = new Size(762, 68), Multiline = true, ScrollBars = ScrollBars.Vertical, BackColor = BgMain, ForeColor = Color.White, BorderStyle = BorderStyle.FixedSingle, Font = new Font("Consolas", 8.5f) };
+
+            var btnLoadConf = CreateStyledButton("📂 Загрузить .conf", 16, 142, 160, 36, Color.FromArgb(55, 55, 70));
+            btnLoadConf.Click += (s, e) =>
+            {
+                using (var ofd = new OpenFileDialog { Filter = "WireGuard/Amnezia Config (*.conf)|*.conf|All (*.*)|*.*" })
+                {
+                    if (ofd.ShowDialog() == DialogResult.OK) txtAmneziaInput.Text = File.ReadAllText(ofd.FileName);
+                }
+            };
+
+            var btnApplyAmz = CreateStyledButton("🔓 Декодировать и применить в ядро", 188, 142, 310, 36, AccentIndigo);
+            btnApplyAmz.Click += (s, e) =>
+            {
+                try
+                {
+                    var decoded = AmneziaDecoder.Decode(txtAmneziaInput.Text);
+                    LogCore(string.Format("Amnezia: {0} | Endpoint: {1}", decoded.ObfuscationSummary, decoded.Endpoint));
+
+                    if (decoded.Kind == "xray" && decoded.Vless != null)
+                    {
+                        cbVlessNodes.Items.Add(decoded.Vless);
+                        cbVlessNodes.SelectedItem = decoded.Vless;
+                        LogCore("Внутри vpn:// обнаружен Xray/VLESS — передано в sing-box! Нажмите 'Запустить sing-box'.");
+                    }
+                    else
+                    {
+                        Directory.CreateDirectory(SingBoxManager.CoresDir);
+                        string confFile = Path.Combine(SingBoxManager.CoresDir, "amnezia_decoded.conf");
+                        File.WriteAllText(confFile, decoded.RawConfig);
+                        LogCore("Конфиг AmneziaWG сохранен: " + confFile);
+                        string amzExe = @"C:\Program Files\AmneziaVPN\AmneziaVPN.exe";
+                        if (File.Exists(amzExe))
+                        {
+                            Process.Start(amzExe);
+                            LogCore("Открыт клиент AmneziaVPN для подключения туннеля.");
+                        }
+                    }
+                }
+                catch (Exception ex) { LogCore("Ошибка декодирования Amnezia: " + ex.Message); }
+            };
+
+            cardAmz.Controls.AddRange(new Control[] { lblAmzTitle, lblAmzHint, txtAmneziaInput, btnLoadConf, btnApplyAmz });
+
+            rtbCoreLog = new RichTextBox
+            {
+                Location = new Point(0, 445),
+                Size = new Size(795, 225),
+                Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
+                BackColor = Color.FromArgb(14, 14, 18),
+                ForeColor = AccentEmerald,
+                BorderStyle = BorderStyle.None,
+                Font = new Font("Consolas", 8.5f),
+                ReadOnly = true
+            };
+
+            page.Controls.AddRange(new Control[] { cardSb, cardAmz, rtbCoreLog });
         }
 
         private void BuildLauncherPage(Panel page)
         {
-            var cardInfo = CreateCard(0, 0, 780, 90, AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right);
-            Label lblTitle = new Label
-            {
-                Text = "Изолированный запуск: отдельный Timezone + GPS без изменения системы",
-                Font = new Font("Segoe UI", 11f, FontStyle.Bold),
-                Location = new Point(16, 12),
-                AutoSize = true
-            };
-            Label lblDesc = new Label
-            {
-                Text = "Часы и часовой пояс Windows не меняются. Подменяются только TZ/V8, WebView2 и отключаются WebRTC/Wi-Fi утечки.",
-                Location = new Point(16, 44),
-                AutoSize = true,
-                ForeColor = TextMuted
-            };
+            var cardInfo = CreateCard(0, 0, 795, 95, AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right);
+            Label lblTitle = new Label { Text = "Изолированный запуск: Timezone + GPS + Zero-Leak (без изменения системы)", Font = new Font("Segoe UI", 11f, FontStyle.Bold), Location = new Point(16, 12), AutoSize = true };
+            Label lblDesc = new Label { Text = "Запускает процесс с TZ=Europe/Amsterdam, блокирует QUIC (--disable-quic), DNS-утечки (--host-resolver-rules),\nWebRTC и BSSID. Если запущен sing-box, трафик автоматически идет через socks5://127.0.0.1:10808.", Location = new Point(16, 40), AutoSize = true, ForeColor = TextMuted };
             cardInfo.Controls.AddRange(new Control[] { lblTitle, lblDesc });
 
-            var cardCfg = CreateCard(0, 102, 780, 110, AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right);
+            var cardCfg = CreateCard(0, 108, 795, 110, AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right);
             Label lblTz = new Label { Text = "Часовой пояс (TZ):", Location = new Point(16, 20), AutoSize = true, ForeColor = TextMuted };
             cbLauncherTz = new ComboBox { Location = new Point(190, 17), Width = 340, DropDownStyle = ComboBoxStyle.DropDownList, BackColor = BgMain, ForeColor = Color.White };
             cbLauncherTz.Items.AddRange(new object[]
@@ -1165,14 +1210,13 @@ namespace FakeGPS.UI
             });
             cbLauncherTz.SelectedIndex = 0;
 
-            Label lblProxy = new Label { Text = "SOCKS5 / HTTP Proxy:", Location = new Point(16, 62), AutoSize = true, ForeColor = TextMuted };
+            Label lblProxy = new Label { Text = "Override Proxy:", Location = new Point(16, 62), AutoSize = true, ForeColor = TextMuted };
             txtLauncherProxy = new TextBox { Location = new Point(190, 59), Width = 340, BackColor = BgMain, ForeColor = Color.White, BorderStyle = BorderStyle.FixedSingle };
-            Label lblHint = new Label { Text = "Опционально (пример: socks5://127.0.0.1:10808)", Location = new Point(540, 62), AutoSize = true, ForeColor = TextMuted };
-
+            Label lblHint = new Label { Text = "(Пусто = авто-подхват sing-box 127.0.0.1:10808)", Location = new Point(540, 62), AutoSize = true, ForeColor = TextMuted };
             cardCfg.Controls.AddRange(new Control[] { lblTz, cbLauncherTz, lblProxy, txtLauncherProxy, lblHint });
 
-            var cardActions = CreateCard(0, 224, 780, 150, AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right);
-            var btnChatGPT = CreateStyledButton("🤖 Запустить ChatGPT (Isolated TZ)", 16, 20, 360, 44, AccentEmerald);
+            var cardActions = CreateCard(0, 230, 795, 150, AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right);
+            var btnChatGPT = CreateStyledButton("🤖 Запустить ChatGPT (Zero-Leak + TZ)", 16, 20, 365, 44, AccentEmerald);
             btnChatGPT.Click += (s, e) =>
             {
                 string tz = cbLauncherTz.SelectedItem.ToString().Split(' ')[0];
@@ -1181,7 +1225,7 @@ namespace FakeGPS.UI
                 if (File.Exists(appx))
                 {
                     IsolatedAppLauncher.LaunchWithSpoofing(appx, "", tz, proxy);
-                    LogLauncher("ChatGPT запущен с TZ=" + tz);
+                    LogLauncher("ChatGPT запущен с TZ=" + tz + " и защитой от утечек.");
                 }
                 else
                 {
@@ -1194,7 +1238,7 @@ namespace FakeGPS.UI
                 }
             };
 
-            var btnClaude = CreateStyledButton("🧠 Запустить Claude (Clean Profile + TZ)", 400, 20, 360, 44, AccentIndigo);
+            var btnClaude = CreateStyledButton("🧠 Запустить Claude (Clean Profile + TZ)", 405, 20, 370, 44, AccentIndigo);
             btnClaude.Click += (s, e) =>
             {
                 string tz = cbLauncherTz.SelectedItem.ToString().Split(' ')[0];
@@ -1204,12 +1248,12 @@ namespace FakeGPS.UI
                 {
                     string profile = Path.Combine(Path.GetTempPath(), "FakeGPS_Claude_Profile");
                     IsolatedAppLauncher.LaunchWithSpoofing(browser, string.Format("https://claude.ai --user-data-dir=\"{0}\"", profile), tz, proxy);
-                    LogLauncher("Claude запущен в изолированном профиле [TZ=" + tz + "]");
+                    LogLauncher("Claude запущен в чистом профиле [TZ=" + tz + ", QUIC=OFF, WebRTC=SAFE]");
                 }
             };
 
-            txtCustomExe = new TextBox { Location = new Point(16, 92), Width = 440, BackColor = BgMain, ForeColor = Color.White, BorderStyle = BorderStyle.FixedSingle };
-            var btnBrowse = CreateStyledButton("Обзор...", 468, 90, 90, 28, Color.FromArgb(55, 55, 70));
+            txtCustomExe = new TextBox { Location = new Point(16, 92), Width = 445, BackColor = BgMain, ForeColor = Color.White, BorderStyle = BorderStyle.FixedSingle };
+            var btnBrowse = CreateStyledButton("Обзор...", 473, 90, 90, 28, Color.FromArgb(55, 55, 70));
             btnBrowse.Click += (s, e) =>
             {
                 using (var ofd = new OpenFileDialog { Filter = "Programs (*.exe)|*.exe" })
@@ -1217,7 +1261,7 @@ namespace FakeGPS.UI
                     if (ofd.ShowDialog() == DialogResult.OK) txtCustomExe.Text = ofd.FileName;
                 }
             };
-            var btnRunCustom = CreateStyledButton("🚀 Запустить EXE", 570, 90, 190, 28, AccentEmerald);
+            var btnRunCustom = CreateStyledButton("🚀 Запустить EXE", 575, 90, 200, 28, AccentEmerald);
             btnRunCustom.Click += (s, e) =>
             {
                 if (File.Exists(txtCustomExe.Text.Trim()))
@@ -1227,13 +1271,12 @@ namespace FakeGPS.UI
                     LogLauncher("Запущено: " + Path.GetFileName(txtCustomExe.Text) + " [TZ=" + tz + "]");
                 }
             };
-
             cardActions.Controls.AddRange(new Control[] { btnChatGPT, btnClaude, txtCustomExe, btnBrowse, btnRunCustom });
 
             rtbLauncherLog = new RichTextBox
             {
-                Location = new Point(0, 388),
-                Size = new Size(780, 265),
+                Location = new Point(0, 392),
+                Size = new Size(795, 275),
                 Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
                 BackColor = Color.FromArgb(14, 14, 18),
                 ForeColor = Color.FromArgb(96, 165, 250),
@@ -1241,16 +1284,15 @@ namespace FakeGPS.UI
                 Font = new Font("Consolas", 9f),
                 ReadOnly = true
             };
-
             page.Controls.AddRange(new Control[] { cardInfo, cardCfg, cardActions, rtbLauncherLog });
         }
 
         private void BuildAIDiscoveryKillSwitchPage(Panel page)
         {
-            var cardTop = CreateCard(0, 0, 780, 130, AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right);
+            var cardTop = CreateCard(0, 0, 795, 130, AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right);
             lblKillSwitchBadge = new Label { Location = new Point(16, 12), AutoSize = true, Font = new Font("Segoe UI", 11f, FontStyle.Bold) };
 
-            var btnPanic = CreateStyledButton("🚨 АВАРИЙНЫЙ KILL SWITCH (Убить выбранные AI + Блок Firewall)", 16, 48, 490, 42, AccentRed);
+            var btnPanic = CreateStyledButton("🚨 АВАРИЙНЫЙ KILL SWITCH (Убить выбранные AI + Блок Firewall)", 16, 48, 500, 42, AccentRed);
             btnPanic.Click += (s, e) =>
             {
                 int killed = AIKillSwitch.TerminateDiscoveredAI(discoveredApps);
@@ -1260,7 +1302,7 @@ namespace FakeGPS.UI
                 RunAIDiscovery();
             };
 
-            var btnUnlock = CreateStyledButton("Снять блок Firewall", 518, 48, 140, 42, Color.FromArgb(55, 55, 70));
+            var btnUnlock = CreateStyledButton("Снять блок Firewall", 528, 48, 145, 42, Color.FromArgb(55, 55, 70));
             btnUnlock.Click += (s, e) =>
             {
                 AIKillSwitch.SetFirewallBlock(false, discoveredApps);
@@ -1268,18 +1310,17 @@ namespace FakeGPS.UI
                 UpdateKillSwitchUI();
             };
 
-            var btnRescan = CreateStyledButton("🔄 Найти AI", 668, 48, 96, 42, AccentIndigo);
+            var btnRescan = CreateStyledButton("🔄 Найти AI", 683, 48, 96, 42, AccentIndigo);
             btnRescan.Click += (s, e) => RunAIDiscovery();
 
             chkAutoKill = new CheckBox { Text = "Авто-убийство процессов при сбое FakeGPS", Location = new Point(16, 98), AutoSize = true, Checked = true };
             chkFirewallGuard = new CheckBox { Text = "Авто-блокировка Firewall при сбое датчика", Location = new Point(360, 98), AutoSize = true, Checked = false };
-
             cardTop.Controls.AddRange(new Control[] { lblKillSwitchBadge, btnPanic, btnUnlock, btnRescan, chkAutoKill, chkFirewallGuard });
 
             lvDiscoveredAI = new ListView
             {
                 Location = new Point(0, 142),
-                Size = new Size(780, 320),
+                Size = new Size(795, 330),
                 Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
                 View = View.Details,
                 CheckBoxes = true,
@@ -1292,20 +1333,16 @@ namespace FakeGPS.UI
             lvDiscoveredAI.Columns.Add("AI Приложение / Вкладка", 230);
             lvDiscoveredAI.Columns.Add("Тип", 130);
             lvDiscoveredAI.Columns.Add("Статус", 100);
-            lvDiscoveredAI.Columns.Add("Путь", 210);
-
+            lvDiscoveredAI.Columns.Add("Путь", 225);
             lvDiscoveredAI.ItemChecked += (s, e) =>
             {
-                if (e.Item.Tag is DiscoveredAIApp)
-                {
-                    ((DiscoveredAIApp)e.Item.Tag).SelectedForKillSwitch = e.Item.Checked;
-                }
+                if (e.Item.Tag is DiscoveredAIApp) ((DiscoveredAIApp)e.Item.Tag).SelectedForKillSwitch = e.Item.Checked;
             };
 
             rtbKillSwitchLog = new RichTextBox
             {
-                Location = new Point(0, 474),
-                Size = new Size(780, 180),
+                Location = new Point(0, 484),
+                Size = new Size(795, 185),
                 Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
                 BackColor = Color.FromArgb(14, 14, 18),
                 ForeColor = AccentEmerald,
@@ -1313,26 +1350,29 @@ namespace FakeGPS.UI
                 Font = new Font("Consolas", 9f),
                 ReadOnly = true
             };
-
             page.Controls.AddRange(new Control[] { cardTop, lvDiscoveredAI, rtbKillSwitchLog });
         }
 
         private void BuildAuditPage(Panel page)
         {
-            var card = CreateCard(0, 0, 780, 340, AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right);
-            Label lblTitle = new Label { Text = "Аудит маскировки: GPS vs Системный TZ vs Публичный IP", Font = new Font("Segoe UI", 12f, FontStyle.Bold), Location = new Point(20, 20), AutoSize = true };
+            var cardTop = CreateCard(0, 0, 795, 95, AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right);
+            Label lblTitle = new Label { Text = "Расширенный аудит утечек (GPS, IPv4/IPv6, DNS, VPN-ядро, Timezone, Wi-Fi BSSID)", Font = new Font("Segoe UI", 11.5f, FontStyle.Bold), Location = new Point(16, 14), AutoSize = true };
+            btnRunAudit = CreateStyledButton("🔎 Запустить полный аудит безопасности", 16, 46, 300, 36, AccentIndigo);
+            btnRunAudit.Click += (s, e) => RunDeepAudit();
+            cardTop.Controls.AddRange(new Control[] { lblTitle, btnRunAudit });
 
-            lblAuditGps = new Label { Location = new Point(20, 70), AutoSize = true, Text = "1. Сенсор FakeGPS Windows: ..." };
-            lblAuditHostTz = new Label { Location = new Point(20, 105), AutoSize = true, Text = "2. Системный Timezone Windows: ..." };
-            lblAuditIp = new Label { Location = new Point(20, 140), AutoSize = true, Text = "3. Публичный IP-адрес: ..." };
-            lblAuditCountry = new Label { Location = new Point(20, 175), AutoSize = true, Text = "4. Страна по IP: ..." };
-            lblAuditVerdict = new Label { Location = new Point(20, 220), AutoSize = true, Font = new Font("Segoe UI", 10.5f, FontStyle.Bold), Text = "Нажмите кнопку для запуска проверки" };
-
-            btnRunAudit = CreateStyledButton("🔎 Запустить полный аудит", 20, 275, 240, 42, AccentIndigo);
-            btnRunAudit.Click += (s, e) => RunSecurityAudit();
-
-            card.Controls.AddRange(new Control[] { lblTitle, lblAuditGps, lblAuditHostTz, lblAuditIp, lblAuditCountry, lblAuditVerdict, btnRunAudit });
-            page.Controls.Add(card);
+            rtbAuditReport = new RichTextBox
+            {
+                Location = new Point(0, 108),
+                Size = new Size(795, 560),
+                Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
+                BackColor = BgCard,
+                ForeColor = TextPrimary,
+                BorderStyle = BorderStyle.None,
+                Font = new Font("Consolas", 10f),
+                ReadOnly = true
+            };
+            page.Controls.AddRange(new Control[] { cardTop, rtbAuditReport });
         }
 
         private void RefreshDashboard()
@@ -1340,7 +1380,7 @@ namespace FakeGPS.UI
             bool active = FakeGPSCore.IsDriverActive();
             lblDriverBadge.Text = active ? "● Драйвер FakeGPS: АКТИВЕН (OK)" : "● Драйвер FakeGPS: ОТКЛЮЧЕН / ОШИБКА";
             lblDriverBadge.ForeColor = active ? AccentEmerald : AccentRed;
-            lblHostTzBadge.Text = "Системный TZ Windows: " + TimeZoneInfo.Local.Id + " (не затрагивается при изолированном запуске)";
+            lblHostTzBadge.Text = "Системный TZ Windows: " + TimeZoneInfo.Local.Id + " (не затрагивается)";
 
             var cfg = FakeGPSCore.GetConfiguredCoordinates();
             if (cfg != null)
@@ -1363,6 +1403,13 @@ namespace FakeGPS.UI
                 }
                 catch { }
             });
+        }
+
+        private void UpdateCoreStatusUI()
+        {
+            bool sbRun = SingBoxManager.IsRunning();
+            lblSingBoxStatus.Text = sbRun ? "● sing-box: ЗАПУЩЕН (127.0.0.1:10808)" : "● sing-box: Остановлен";
+            lblSingBoxStatus.ForeColor = sbRun ? AccentEmerald : TextMuted;
         }
 
         private void RefreshAppList()
@@ -1406,6 +1453,7 @@ namespace FakeGPS.UI
 
         private void GuardTimer_Tick(object sender, EventArgs e)
         {
+            UpdateCoreStatusUI();
             bool active = FakeGPSCore.IsDriverActive();
             if (!active)
             {
@@ -1422,64 +1470,45 @@ namespace FakeGPS.UI
             }
         }
 
-        private void RunSecurityAudit()
+        private void RunDeepAudit()
         {
             btnRunAudit.Enabled = false;
-            lblAuditVerdict.Text = "Проверка...";
+            rtbAuditReport.Text = "Выполняется глубокий аудит утечек (GPS, Direct IP, Tunnel IP, IPv6, DNS, Wi-Fi)...\n";
 
             ThreadPool.QueueUserWorkItem(state =>
             {
-                var loc = FakeGPSCore.QueryWindowsLocationApi();
-                string publicIp = "Неизвестно";
-                string country = "Неизвестно";
+                var gps = FakeGPSCore.QueryWindowsLocationApi();
+                var rep = DeepLeakAuditor.RunFullAudit(gps);
 
-                try
-                {
-                    using (var wc = new WebClient())
-                    {
-                        wc.Headers.Add("User-Agent", "FakeGPS-Audit");
-                        string json = wc.DownloadString("http://ip-api.com/json");
-                        var mIp = Regex.Match(json, "\"query\"\\s*:\\s*\"([^\"]+)\"");
-                        var mCountry = Regex.Match(json, "\"country\"\\s*:\\s*\"([^\"]+)\"");
-                        if (mIp.Success) publicIp = mIp.Groups[1].Value;
-                        if (mCountry.Success) country = mCountry.Groups[1].Value;
-                    }
-                }
-                catch { }
+                var sb = new StringBuilder();
+                sb.AppendLine("======================================================================");
+                sb.AppendLine("                 РАСШИРЕННЫЙ АУДИТ УТЕЧЕК И МАСКИРОВКИ               ");
+                sb.AppendLine("======================================================================");
+                sb.AppendLine("");
+                sb.AppendLine("1. [GPS Сенсор Windows]      : " + rep.GpsStatus);
+                sb.AppendLine("2. [Системный TZ Windows]    : " + rep.HostTimezone + " (хост не затронут)");
+                sb.AppendLine("3. [Прямой IP системы]       : " + rep.DirectIp + " (" + rep.DirectCountry + ")");
+                sb.AppendLine("4. [Ядро sing-box]           : " + (rep.SingBoxRunning ? "ЗАПУЩЕНО (127.0.0.1:10808)" : "Остановлено"));
+                sb.AppendLine("5. [Выходной IP туннеля]     : " + rep.ProxyIp + " (" + rep.ProxyCountry + ")");
+                sb.AppendLine("6. [Глобальный IPv6 (утечка)]: " + rep.IPv6Addresses);
+                sb.AppendLine("7. [DNS-серверы адаптеров]   : " + rep.ActiveDnsServers);
+                sb.AppendLine("8. [Wi-Fi BSSID риск]        : " + (rep.WifiEnabled ? "Wi-Fi активен (защищается флагом GeolocationBssid)" : "Отключен (Безопасно)"));
+                sb.AppendLine("9. [Firewall Kill Switch]    : " + (AIKillSwitch.IsFirewallBlockActive() ? "Включен (Блокировка)" : "Дежурный режим"));
+                sb.AppendLine("");
+                sb.AppendLine("----------------------------------------------------------------------");
+                sb.AppendLine("ВЕРДИКТ: " + rep.Verdict);
+                sb.AppendLine("----------------------------------------------------------------------");
 
                 this.Invoke((MethodInvoker)delegate
                 {
-                    lblAuditGps.Text = string.Format("1. Сенсор FakeGPS Windows: {0}, {1}",
-                        loc.Latitude.ToString("F4", CultureInfo.InvariantCulture),
-                        loc.Longitude.ToString("F4", CultureInfo.InvariantCulture));
-                    lblAuditHostTz.Text = "2. Системный Timezone Windows: " + TimeZoneInfo.Local.Id;
-                    lblAuditIp.Text = "3. Публичный IP-адрес: " + publicIp;
-                    lblAuditCountry.Text = "4. Страна по IP: " + country;
-
-                    bool gpsIsNl = (loc.Latitude >= 50.7 && loc.Latitude <= 53.6 && loc.Longitude >= 3.3 && loc.Longitude <= 7.3);
-                    bool ipIsNl = country.IndexOf("Netherlands", StringComparison.OrdinalIgnoreCase) >= 0;
-
-                    if (gpsIsNl && ipIsNl)
-                    {
-                        lblAuditVerdict.Text = "✅ ИДЕАЛЬНО: И GPS, и IP указывают на Нидерланды. Используйте Изолированный лаунчер для TZ!";
-                        lblAuditVerdict.ForeColor = AccentEmerald;
-                    }
-                    else if (gpsIsNl)
-                    {
-                        lblAuditVerdict.Text = string.Format("⚠️ РАСХОЖДЕНИЕ: GPS в Нидерландах, но IP из '{0}'. Включите NL VPN или Proxy!", country);
-                        lblAuditVerdict.ForeColor = Color.FromArgb(245, 158, 11);
-                    }
-                    else
-                    {
-                        lblAuditVerdict.Text = "❌ GPS не установлен на Нидерланды.";
-                        lblAuditVerdict.ForeColor = AccentRed;
-                    }
+                    rtbAuditReport.Text = sb.ToString();
                     btnRunAudit.Enabled = true;
                 });
             });
         }
 
         private void Log(string msg) { rtbLog.AppendText(string.Format("[{0}] {1}\n", DateTime.Now.ToString("HH:mm:ss"), msg)); rtbLog.ScrollToCaret(); }
+        private void LogCore(string msg) { rtbCoreLog.AppendText(string.Format("[{0}] {1}\n", DateTime.Now.ToString("HH:mm:ss"), msg)); rtbCoreLog.ScrollToCaret(); }
         private void LogLauncher(string msg) { rtbLauncherLog.AppendText(string.Format("[{0}] {1}\n", DateTime.Now.ToString("HH:mm:ss"), msg)); rtbLauncherLog.ScrollToCaret(); }
         private void LogKillSwitch(string msg) { rtbKillSwitchLog.AppendText(string.Format("[{0}] {1}\n", DateTime.Now.ToString("HH:mm:ss"), msg)); rtbKillSwitchLog.ScrollToCaret(); }
 

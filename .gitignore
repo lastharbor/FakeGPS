@@ -223,3 +223,6 @@ _Pvt_Extensions
 *.zip
 bin/
 
+
+dist/cores/
+
