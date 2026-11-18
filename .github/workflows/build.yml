@@ -1,0 +1,92 @@
+name: Build FakeGPS Windows 11
+
+on:
+  push:
+    branches: [ master, main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ master, main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Locate .NET Framework csc.exe
+        id: csc
+        shell: pwsh
+        run: |
+          $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          if (-not (Test-Path $csc)) {
+            Write-Error "csc.exe not found at $csc"
+            exit 1
+          }
+          echo "csc_path=$csc" >> $env:GITHUB_OUTPUT
+
+      - name: Build FakeGPS CLI (FakeGPS.exe)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path "build_out" -Force | Out-Null
+          & "${{ steps.csc.outputs.csc_path }}" `
+            /target:exe `
+            /optimize+ `
+            /platform:anycpu `
+            /r:System.dll,System.Core.dll,System.Device.dll `
+            /out:"build_out\FakeGPS.exe" `
+            "src\FakeGPS.Windows11\Program.cs"
+
+      - name: Build FakeGPS Studio UI (FakeGPS.UI.exe)
+        shell: pwsh
+        run: |
+          & "${{ steps.csc.outputs.csc_path }}" `
+            /target:winexe `
+            /optimize+ `
+            /platform:anycpu `
+            /r:System.dll,System.Core.dll,System.Drawing.dll,System.Windows.Forms.dll,System.Device.dll `
+            /out:"build_out\FakeGPS.UI.exe" `
+            "src\FakeGPS.UI\Program.cs" `
+            "src\FakeGPS.UI\CoreEngines.cs"
+
+      - name: Smoke test CLI binary
+        shell: pwsh
+        run: |
+          & ".\build_out\FakeGPS.exe" -h
+
+      - name: Package Release Bundle
+        shell: pwsh
+        run: |
+          $pkg = "build_out\package"
+          New-Item -ItemType Directory -Path "$pkg\driver" -Force | Out-Null
+          Copy-Item "build_out\FakeGPS.exe" "$pkg\FakeGPS.exe" -Force
+          Copy-Item "build_out\FakeGPS.UI.exe" "$pkg\FakeGPS.UI.exe" -Force
+          Copy-Item "dist\driver\*" "$pkg\driver\" -Force
+          Copy-Item "dist\Install.ps1" "$pkg\Install.ps1" -Force
+          Copy-Item "dist\Download-Cores.ps1" "$pkg\Download-Cores.ps1" -Force
+          Compress-Archive -Path "$pkg\*" -DestinationPath "build_out\FakeGPS-Win11-x64.zip" -Force
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: FakeGPS-Win11-x64
+          path: |
+            build_out/FakeGPS.exe
+            build_out/FakeGPS.UI.exe
+            build_out/FakeGPS-Win11-x64.zip
+
+      - name: Create GitHub Release on Tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          gh release create "$tag" "build_out\FakeGPS-Win11-x64.zip" "build_out\FakeGPS.exe" "build_out\FakeGPS.UI.exe" `
+            --title "FakeGPS $tag (Windows 11 Edition)" `
+            --notes "Automated Windows 11 build containing FakeGPS.exe, FakeGPS.UI.exe, signed UMDF driver, and Download-Cores.ps1."
