@@ -253,6 +253,68 @@ namespace FakeGPS.UI
         }
     }
 
+    public static class IsolatedAppLauncher
+    {
+        public static Process LaunchWithSpoofing(string exePath, string arguments, string timeZoneId, string proxyUrl = "")
+        {
+            if (string.IsNullOrEmpty(timeZoneId))
+                timeZoneId = "Europe/Amsterdam";
+
+            var psi = new ProcessStartInfo();
+            psi.FileName = exePath;
+
+            // Build Chromium / Electron flags for zero-leak spoofing
+            var extraArgs = new List<string>();
+            extraArgs.Add(string.Format("--timezone=\"{0}\"", timeZoneId));
+            extraArgs.Add("--force-webrtc-ip-handling-policy=disable_non_proxied_udp");
+            extraArgs.Add("--enforce-webrtc-ip-permission-check");
+            extraArgs.Add("--disable-features=GeolocationBssid");
+
+            if (!string.IsNullOrEmpty(proxyUrl))
+            {
+                extraArgs.Add(string.Format("--proxy-server=\"{0}\"", proxyUrl.Trim()));
+            }
+
+            string combinedArgs = string.Join(" ", extraArgs.ToArray());
+            if (!string.IsNullOrEmpty(arguments))
+            {
+                combinedArgs = arguments + " " + combinedArgs;
+            }
+
+            psi.Arguments = combinedArgs;
+            psi.UseShellExecute = false;
+
+            // Set Environment Variables for V8, Node, WebView2, and C-Runtime
+            psi.EnvironmentVariables["TZ"] = timeZoneId;
+            psi.EnvironmentVariables["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = combinedArgs;
+
+            // Ensure app is allowed in Windows Location Consent Store
+            try
+            {
+                PerAppLocationManager.AddAppByPath(exePath, true);
+            }
+            catch { }
+
+            return Process.Start(psi);
+        }
+
+        public static string FindBrowserPath()
+        {
+            string[] paths = new string[]
+            {
+                @"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+                @"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                @"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+            };
+
+            foreach (var p in paths)
+            {
+                if (File.Exists(p)) return p;
+            }
+            return "";
+        }
+    }
+
     public static class AIKillSwitch
     {
         private static readonly string[] AIProcessNames = new string[]
@@ -314,12 +376,10 @@ namespace FakeGPS.UI
         {
             try
             {
-                // Always remove old rule first
                 RunNetsh(string.Format("advfirewall firewall delete rule name=\"{0}\"", FirewallRuleName));
 
                 if (block)
                 {
-                    // Block outbound connections for Claude and ChatGPT desktop executables
                     string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
                     string programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
 
@@ -339,7 +399,6 @@ namespace FakeGPS.UI
                         }
                     }
 
-                    // Also add a generic rule by name if files not directly found
                     RunNetsh(string.Format("advfirewall firewall add rule name=\"{0}\" dir=out action=block protocol=TCP remoteport=443 description=\"FakeGPS Emergency Block\"",
                         FirewallRuleName + "_Domains"));
                 }
@@ -368,6 +427,7 @@ namespace FakeGPS.UI
         private TabControl tabs;
         private TabPage tabDashboard;
         private TabPage tabPerApp;
+        private TabPage tabLauncher;
         private TabPage tabKillSwitch;
         private TabPage tabAudit;
 
@@ -389,6 +449,12 @@ namespace FakeGPS.UI
         private Button btnAddCustomApp;
         private Button btnAllowAll;
         private Button btnDenyAll;
+
+        // Launcher controls (Per-App Timezone & Shield)
+        private ComboBox cbLauncherTz;
+        private TextBox txtLauncherProxy;
+        private TextBox txtCustomExe;
+        private RichTextBox rtbLauncherLog;
 
         // KillSwitch controls
         private Label lblKillSwitchStatus;
@@ -416,25 +482,28 @@ namespace FakeGPS.UI
 
         private void InitializeComponent()
         {
-            this.Text = "FakeGPS Controller & AI Guard (Windows 11)";
-            this.Size = new Size(820, 640);
-            this.MinimumSize = new Size(760, 560);
+            this.Text = "FakeGPS Controller & AI Guard (Windows 11 Edition)";
+            this.Size = new Size(860, 680);
+            this.MinimumSize = new Size(800, 600);
             this.StartPosition = FormStartPosition.CenterScreen;
             this.Font = new Font("Segoe UI", 9.5f, FontStyle.Regular);
 
             tabs = new TabControl { Dock = DockStyle.Fill };
             tabDashboard = new TabPage { Text = "  🛰️ GPS Контроллер  " };
             tabPerApp = new TabPage { Text = "  🎯 Спуфинг по приложениям  " };
+            tabLauncher = new TabPage { Text = "  🚀 Изолированный лаунчер (Timezone + GPS)  " };
             tabKillSwitch = new TabPage { Text = "  🛡️ AI Kill Switch (Claude / ChatGPT)  " };
             tabAudit = new TabPage { Text = "  🔍 Аудит утечек  " };
 
             tabs.TabPages.Add(tabDashboard);
             tabs.TabPages.Add(tabPerApp);
+            tabs.TabPages.Add(tabLauncher);
             tabs.TabPages.Add(tabKillSwitch);
             tabs.TabPages.Add(tabAudit);
 
             BuildDashboardTab();
             BuildPerAppTab();
+            BuildLauncherTab();
             BuildKillSwitchTab();
             BuildAuditTab();
 
@@ -449,7 +518,6 @@ namespace FakeGPS.UI
         private void ApplyModernDarkTheme()
         {
             Color darkBg = Color.FromArgb(24, 24, 27);
-            Color cardBg = Color.FromArgb(39, 39, 42);
             Color textLight = Color.FromArgb(244, 244, 245);
 
             this.BackColor = darkBg;
@@ -470,10 +538,10 @@ namespace FakeGPS.UI
             lblCurrentConfig = new Label { Location = new Point(15, 45), AutoSize = true };
             lblApiLocation = new Label { Location = new Point(15, 75), AutoSize = true };
 
-            btnRefresh = new Button { Text = "🔄 Обновить статус", Location = new Point(580, 15), Size = new Size(180, 34) };
+            btnRefresh = new Button { Text = "🔄 Обновить статус", Location = new Point(620, 15), Size = new Size(180, 34) };
             btnRefresh.Click += (s, e) => RefreshDashboard();
 
-            btnRestartDriver = new Button { Text = "⚡ Перезапуск драйвера", Location = new Point(580, 58), Size = new Size(180, 34) };
+            btnRestartDriver = new Button { Text = "⚡ Перезапуск драйвера", Location = new Point(620, 58), Size = new Size(180, 34) };
             btnRestartDriver.Click += (s, e) =>
             {
                 Log("Перезапуск PnP узла драйвера FakeGPS...");
@@ -484,12 +552,11 @@ namespace FakeGPS.UI
 
             pnlTop.Controls.AddRange(new Control[] { lblDriverStatus, lblCurrentConfig, lblApiLocation, btnRefresh, btnRestartDriver });
 
-            // Presets & Input Group
             GroupBox gb = new GroupBox
             {
                 Text = "Выбор координат (Нидерланды и мир)",
                 Location = new Point(15, 150),
-                Size = new Size(770, 160),
+                Size = new Size(810, 160),
                 ForeColor = Color.White
             };
 
@@ -557,11 +624,10 @@ namespace FakeGPS.UI
 
             gb.Controls.AddRange(new Control[] { lblPresets, cbPresets, lblLat, txtLat, lblLon, txtLon, btnApply });
 
-            // Log box
             rtbLog = new RichTextBox
             {
                 Location = new Point(15, 325),
-                Size = new Size(770, 240),
+                Size = new Size(810, 270),
                 BackColor = Color.FromArgb(15, 15, 18),
                 ForeColor = Color.FromArgb(161, 161, 170),
                 Font = new Font("Consolas", 9f),
@@ -617,7 +683,7 @@ namespace FakeGPS.UI
             };
             lvApps.Columns.Add("Доступ (FakeGPS)", 130);
             lvApps.Columns.Add("Приложение", 180);
-            lvApps.Columns.Add("Полный путь", 440);
+            lvApps.Columns.Add("Полный путь", 480);
 
             lvApps.ItemChecked += (s, e) =>
             {
@@ -635,6 +701,186 @@ namespace FakeGPS.UI
 
             tabPerApp.Controls.Add(lvApps);
             tabPerApp.Controls.Add(pnlHeader);
+        }
+
+        private void BuildLauncherTab()
+        {
+            Panel pnl = new Panel { Dock = DockStyle.Fill, Padding = new Padding(20) };
+
+            Label lblTitle = new Label
+            {
+                Text = "Изолированный запуск приложений (Спуфинг Timezone + GPS без изменения системы)",
+                Font = new Font("Segoe UI", 11.5f, FontStyle.Bold),
+                Location = new Point(20, 15),
+                AutoSize = true
+            };
+
+            Label lblDesc = new Label
+            {
+                Text = "Запускает процесс с индивидуальным часовым поясом (V8 / Chromium Intl.DateTimeFormat),\n" +
+                       "передает спуфленный GPS из FakeGPS, блокирует WebRTC утечки и Wi-Fi триангуляцию.\n" +
+                       "Системные часы и настройки Windows остаются нетронутыми!",
+                Location = new Point(20, 48),
+                AutoSize = true,
+                ForeColor = Color.FromArgb(161, 161, 170)
+            };
+
+            GroupBox gbSettings = new GroupBox
+            {
+                Text = "Параметры изолированного окружения",
+                Location = new Point(20, 115),
+                Size = new Size(800, 110),
+                ForeColor = Color.White
+            };
+
+            Label lblTz = new Label { Text = "Часовой пояс (Timezone):", Location = new Point(20, 30), AutoSize = true };
+            cbLauncherTz = new ComboBox { Location = new Point(210, 27), Width = 320, DropDownStyle = ComboBoxStyle.DropDownList };
+            cbLauncherTz.Items.Add("Europe/Amsterdam (Нидерланды, CET UTC+1)");
+            cbLauncherTz.Items.Add("Europe/London (Великобритания, GMT UTC+0)");
+            cbLauncherTz.Items.Add("Europe/Berlin (Германия, CET UTC+1)");
+            cbLauncherTz.Items.Add("Europe/Paris (Франция, CET UTC+1)");
+            cbLauncherTz.Items.Add("America/New_York (США Восток, EST UTC-5)");
+            cbLauncherTz.Items.Add("Asia/Tokyo (Япония, JST UTC+9)");
+            cbLauncherTz.SelectedIndex = 0;
+
+            Label lblProxy = new Label { Text = "SOCKS5 / HTTP Proxy:", Location = new Point(20, 68), AutoSize = true };
+            txtLauncherProxy = new TextBox { Location = new Point(210, 65), Width = 320, Text = "" };
+            Label lblProxyHint = new Label { Text = "(Опционально. Пример: socks5://127.0.0.1:10808)", Location = new Point(540, 68), AutoSize = true, ForeColor = Color.Gray };
+
+            gbSettings.Controls.AddRange(new Control[] { lblTz, cbLauncherTz, lblProxy, txtLauncherProxy, lblProxyHint });
+
+            // Launch buttons group
+            GroupBox gbActions = new GroupBox
+            {
+                Text = "Быстрый защищенный запуск",
+                Location = new Point(20, 235),
+                Size = new Size(800, 150),
+                ForeColor = Color.White
+            };
+
+            Button btnLaunchChatGPT = new Button
+            {
+                Text = "🤖 Запустить ChatGPT (WebView2 / App)",
+                Location = new Point(20, 30),
+                Size = new Size(360, 42),
+                BackColor = Color.FromArgb(16, 185, 129),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("Segoe UI", 10f, FontStyle.Bold)
+            };
+            btnLaunchChatGPT.Click += (s, e) =>
+            {
+                string tz = GetSelectedTimezone();
+                string proxy = txtLauncherProxy.Text.Trim();
+
+                LogLauncher(string.Format("Запуск ChatGPT с часовым поясом '{0}'...", tz));
+                // Try launching ChatGPT via ms-windows-store uri or direct executable
+                string appxPath = @"C:\Program Files\WindowsApps\OpenAI.Codex_26.1111.2228.0_x64__2p2nqsd0c76g0\app\ChatGPT.exe";
+                if (File.Exists(appxPath))
+                {
+                    IsolatedAppLauncher.LaunchWithSpoofing(appxPath, "", tz, proxy);
+                    LogLauncher("ChatGPT запущен в изолированном режиме с параметрами анти-детекта.");
+                }
+                else
+                {
+                    // Launch browser ChatGPT
+                    string browser = IsolatedAppLauncher.FindBrowserPath();
+                    if (!string.IsNullOrEmpty(browser))
+                    {
+                        IsolatedAppLauncher.LaunchWithSpoofing(browser, "https://chatgpt.com", tz, proxy);
+                        LogLauncher("ChatGPT запущен в защищенном окне браузера: " + browser);
+                    }
+                    else
+                    {
+                        LogLauncher("Не удалось найти исполняемый файл ChatGPT или браузера.");
+                    }
+                }
+            };
+
+            Button btnLaunchClaude = new Button
+            {
+                Text = "🧠 Запустить Claude (Браузер с Amsterdam TZ + GPS)",
+                Location = new Point(410, 30),
+                Size = new Size(360, 42),
+                BackColor = Color.FromArgb(139, 92, 246),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("Segoe UI", 10f, FontStyle.Bold)
+            };
+            btnLaunchClaude.Click += (s, e) =>
+            {
+                string tz = GetSelectedTimezone();
+                string proxy = txtLauncherProxy.Text.Trim();
+                string browser = IsolatedAppLauncher.FindBrowserPath();
+
+                if (!string.IsNullOrEmpty(browser))
+                {
+                    string profileDir = Path.Combine(Path.GetTempPath(), "FakeGPS_Claude_Profile");
+                    string args = string.Format("https://claude.ai --user-data-dir=\"{0}\"", profileDir);
+                    IsolatedAppLauncher.LaunchWithSpoofing(browser, args, tz, proxy);
+                    LogLauncher("Claude запущен в чистом профиле с часовым поясом " + tz + " и защитой WebRTC.");
+                }
+                else
+                {
+                    LogLauncher("Браузер (Brave / Chrome / Edge) не найден.");
+                }
+            };
+
+            Label lblCustom = new Label { Text = "Свой .EXE:", Location = new Point(20, 95), AutoSize = true };
+            txtCustomExe = new TextBox { Location = new Point(100, 92), Width = 370 };
+            Button btnBrowseCustom = new Button { Text = "Обзор...", Location = new Point(480, 90), Size = new Size(90, 30) };
+            btnBrowseCustom.Click += (s, e) =>
+            {
+                using (var ofd = new OpenFileDialog { Filter = "Programs (*.exe)|*.exe" })
+                {
+                    if (ofd.ShowDialog() == DialogResult.OK)
+                    {
+                        txtCustomExe.Text = ofd.FileName;
+                    }
+                }
+            };
+
+            Button btnLaunchCustom = new Button { Text = "🚀 Запустить изолированно", Location = new Point(585, 90), Size = new Size(185, 30) };
+            btnLaunchCustom.Click += (s, e) =>
+            {
+                string path = txtCustomExe.Text.Trim();
+                if (File.Exists(path))
+                {
+                    string tz = GetSelectedTimezone();
+                    string proxy = txtLauncherProxy.Text.Trim();
+                    IsolatedAppLauncher.LaunchWithSpoofing(path, "", tz, proxy);
+                    LogLauncher(string.Format("Запущено: {0} [TZ={1}]", Path.GetFileName(path), tz));
+                }
+                else
+                {
+                    MessageBox.Show(this, "Укажите существующий путь к .exe файлу.", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            };
+
+            gbActions.Controls.AddRange(new Control[]
+            {
+                btnLaunchChatGPT, btnLaunchClaude, lblCustom, txtCustomExe, btnBrowseCustom, btnLaunchCustom
+            });
+
+            rtbLauncherLog = new RichTextBox
+            {
+                Location = new Point(20, 395),
+                Size = new Size(800, 200),
+                BackColor = Color.FromArgb(15, 15, 18),
+                ForeColor = Color.FromArgb(96, 165, 250),
+                Font = new Font("Consolas", 9f),
+                ReadOnly = true
+            };
+
+            pnl.Controls.AddRange(new Control[] { lblTitle, lblDesc, gbSettings, gbActions, rtbLauncherLog });
+            tabLauncher.Controls.Add(pnl);
+        }
+
+        private string GetSelectedTimezone()
+        {
+            string txt = cbLauncherTz.SelectedItem.ToString();
+            int idx = txt.IndexOf(' ');
+            return (idx > 0) ? txt.Substring(0, idx) : "Europe/Amsterdam";
         }
 
         private void BuildKillSwitchTab()
@@ -731,7 +977,7 @@ namespace FakeGPS.UI
 
             Label lblTitle = new Label
             {
-                Text = "Диагностика полной маскировки: GPS vs Внешний IP vs Wi-Fi",
+                Text = "Диагностика полной маскировки: GPS vs Внешний IP vs Часовой пояс",
                 Font = new Font("Segoe UI", 12f, FontStyle.Bold),
                 Location = new Point(20, 20),
                 AutoSize = true
@@ -882,7 +1128,6 @@ namespace FakeGPS.UI
                     {
                         wc.Headers.Add("User-Agent", "FakeGPS-Audit");
                         string json = wc.DownloadString("http://ip-api.com/json");
-                        // Simple regex extraction to avoid heavy json dependencies
                         var mIp = Regex.Match(json, "\"query\"\\s*:\\s*\"([^\"]+)\"");
                         var mCountry = Regex.Match(json, "\"country\"\\s*:\\s*\"([^\"]+)\"");
                         if (mIp.Success) publicIp = mIp.Groups[1].Value;
@@ -929,6 +1174,12 @@ namespace FakeGPS.UI
         {
             rtbLog.AppendText(string.Format("[{0}] {1}\n", DateTime.Now.ToString("HH:mm:ss"), msg));
             rtbLog.ScrollToCaret();
+        }
+
+        private void LogLauncher(string msg)
+        {
+            rtbLauncherLog.AppendText(string.Format("[{0}] {1}\n", DateTime.Now.ToString("HH:mm:ss"), msg));
+            rtbLauncherLog.ScrollToCaret();
         }
 
         private void LogKillSwitch(string msg)
